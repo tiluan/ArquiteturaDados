@@ -1,7 +1,7 @@
 import json
 import os
 
-DASHBOARD_FILE = "app/combined_dashboard.lvdash.json"
+DASHBOARD_FILE = "app/1-Custos_e_FinOps.lvdash.json"
 REFERENCE_FILE = "app/Account Usage Dashboard v2.lvdash.json"
 
 def validate():
