@@ -187,6 +187,20 @@ def merge_dashboards():
     combined_data['pages'] = final_pages
 
     # Save
+    if 'theme' in combined_data['uiSettings']:
+        combined_data['uiSettings']['theme']['visualizationColors'] = [
+            "#0096FA",
+            "#314D5A",
+            "#F78DA7",
+            "#FF6900",
+            "#FCB900",
+            "#7BDCB5",
+            "#00D084",
+            "#8ED1FC",
+            "#0693E3",
+            "#9B51E0"
+        ]
+
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         json.dump(combined_data, f, indent=2)
 
