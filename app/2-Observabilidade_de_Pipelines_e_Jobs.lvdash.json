@@ -1,117 +1,117 @@
 {
   "datasets": [
     {
-      "name": "7bcab300",
-      "displayName": "finished_jobs",
+      "name": "51dfb5a7",
+      "displayName": "jobs_finalizados",
       "query": "SELECT * FROM system.lakeflow.job_run_timeline WHERE result_state IS NOT NULL;"
     },
     {
-      "name": "b3d81761",
+      "name": "b2a8f9c5",
       "displayName": "most_retry_jobs_30_days",
       "query": "with job_run_timeline_with_cost as (\n  SELECT\n    t1.*,\n    t2.job_id,\n    t2.run_id,\n    t1.identity_metadata.run_as as run_as,\n    t2.result_state,\n    t1.usage_quantity * list_prices.pricing.default as list_cost\n  FROM system.billing.usage t1\n    INNER JOIN system.lakeflow.job_run_timeline t2\n      ON\n        t1.workspace_id=t2.workspace_id\n        AND t1.usage_metadata.job_id = t2.job_id\n        AND t1.usage_metadata.job_run_id = t2.run_id\n        AND t1.usage_start_time >= date_trunc(\"Hour\", t2.period_start_time)\n        AND t1.usage_start_time < date_trunc(\"Hour\", t2.period_end_time) + INTERVAL 1 HOUR\n    INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' AND \n    t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAYS\n),\ncumulative_run_status_cost as (\n  SELECT\n    workspace_id, \n    job_id,\n    run_id,\n    run_as,\n    result_state,\n    usage_end_time,\n    SUM(list_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_cost\n  FROM job_run_timeline_with_cost\n  ORDER BY workspace_id, job_id, run_id, usage_end_time\n),\ncost_per_status as (\n  SELECT\n      workspace_id, \n      job_id,\n      run_id,\n      run_as,\n      result_state,\n      usage_end_time,\n      cumulative_cost - COALESCE(LAG(cumulative_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time), 0) AS result_state_cost\n  FROM cumulative_run_status_cost\n  WHERE result_state IS NOT NULL\n  ORDER BY workspace_id, job_id, run_id, usage_end_time),\ncost_per_unsuccesful_status_agg as (\n  SELECT\n    workspace_id, \n    job_id,\n    run_id,\n    first(run_as, TRUE) as run_as,\n    SUM(result_state_cost) as list_cost\n  FROM cost_per_status\n  WHERE\n    result_state != \"SUCCEEDED\"\n  GROUP BY ALL\n),\nrepaired_runs as (\n  SELECT \n    workspace_id, job_id, run_id, COUNT(*) as cnt\n  FROM system.lakeflow.job_run_timeline\n  WHERE result_state IS NOT NULL\n  GROUP BY ALL\n  HAVING cnt > 1\n),\nsuccessful_repairs as (\n  SELECT t1.workspace_id, t1.job_id, t1.run_id, MAX(t1.period_end_time) as period_end_time\n  FROM system.lakeflow.job_run_timeline t1\n  JOIN repaired_runs t2\n  ON t1.workspace_id=t2.workspace_id AND t1.job_id=t2.job_id AND t1.run_id=t2.run_id\n  WHERE t1.result_state=\"SUCCEEDED\"\n  GROUP BY ALL\n),\ncombined_repairs as (\n  SELECT\n    t1.*,\n    t2.period_end_time, \n    t1.cnt as repairs\n  FROM repaired_runs t1\n    LEFT JOIN successful_repairs t2 USING (workspace_id, job_id, run_id)\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT\n  last(t3.name) as name,\n  t1.workspace_id,\n  t1.job_id,\n  t1.run_id,\n  first(t4.run_as, TRUE) as run_as,\n  first(t1.repairs) - 1 as repairs,\n  first(t4.list_cost) as repair_list_cost,\n  CASE WHEN t1.period_end_time IS NOT NULL THEN CAST(t1.period_end_time - MIN(t2.period_end_time) as LONG) ELSE NULL END AS repair_time_seconds\nFROM combined_repairs t1\n  JOIN system.lakeflow.job_run_timeline t2 USING (workspace_id, job_id, run_id)\n  LEFT JOIN most_recent_jobs t3 USING (workspace_id, job_id)\n  LEFT JOIN cost_per_unsuccesful_status_agg t4 USING (workspace_id, job_id, run_id)\nWHERE\n  t2.result_state IS NOT NULL\nGROUP BY t1.workspace_id, t1.job_id, t1.run_id, t1.period_end_time\nORDER BY repairs DESC"
     },
     {
-      "name": "858700d9",
+      "name": "9417fc0c",
       "displayName": "wow_growth",
       "query": "with jobs_usage_with_list_cost as (\n  SELECT\n    t1.*,\n    t1.usage_quantity * list_prices.pricing.default as list_cost\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' \n),\nweekly_jobs_list_cost as (\n  select\n    date_sub(to_date(usage_start_time), dayofweek(to_date(usage_start_time))) as week_start,\n    SUM(list_cost) as list_cost,\n    COUNT(distinct to_date(usage_start_time)) as days\n  from\n    jobs_usage_with_list_cost t1 \n  group by all\n  having days = 7\n  order by 1 asc, 2 asc\n),\nlist_cost_growth as (\n    select\n        week_start,\n        list_cost,\n        100 * (list_cost - lag(list_cost, 1) over (order by week_start)) / lag(list_cost, 1) over (order by week_start) as weekly_growth\n    from weekly_jobs_list_cost\n    order by week_start asc\n)\nselect\n    week_start,\n    weekly_growth,\n    avg(weekly_growth) over (order by week_start ROWS BETWEEN 12 preceding AND CURRENT ROW) as 3_months_growth_moving_avg,\n    list_cost\nfrom list_cost_growth"
     },
     {
-      "name": "93f8fd0a",
+      "name": "0956d9ea",
       "displayName": "jobs_stale_datasets",
       "query": "with producers as (\n  SELECT \n    workspace_id, entity_id as job_id, target_table_full_name, created_by\n  FROM\n    system.access.table_lineage\n  WHERE\n    entity_type=\"JOB\" AND \n    target_table_full_name IS NOT NULL AND\n    event_date > CURRENT_DATE() - INTERVAL 30 DAY\n  GROUP BY ALL\n),\nconsumers as (\n  SELECT \n    workspace_id, source_table_full_name\n  FROM\n    system.access.table_lineage\n  WHERE\n    source_table_full_name IS NOT NULL AND event_date > CURRENT_DATE() - INTERVAL 30 DAY\n  GROUP BY ALL\n),\njobs_with_datasets as (\n  SELECT \n    workspace_id, entity_id as job_id, collect_set(target_table_full_name) as populated_sets\n  FROM\n    system.access.table_lineage\n  WHERE\n    entity_type=\"JOB\" AND \n    target_table_full_name IS NOT NULL\n  GROUP BY ALL\n),\njobs_without_consumption as (\n  SELECT \n    t1.*\n  FROM producers t1\n    LEFT OUTER JOIN consumers t2\n      ON t1.target_table_full_name = t2.source_table_full_name AND t1.workspace_id=t2.workspace_id\n),\njob_run_timeline_with_cost as (\n  SELECT\n    t1.*,\n    t1.usage_metadata.job_id as job_id,\n    t1.usage_metadata.job_run_id as run_id,\n    t1.identity_metadata.run_as as run_as,\n    t1.usage_quantity * list_prices.pricing.default AS list_cost\n  FROM system.billing.usage t1\n    INNER JOIN system.billing.list_prices list_prices \n      ON\n        t1.cloud = list_prices.cloud AND\n        t1.sku_name = list_prices.sku_name AND\n        t1.usage_start_time >= list_prices.price_start_time AND\n        (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is NULL)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' AND\n    t1.usage_metadata.job_id IS NOT NULL AND\n    t1.usage_metadata.job_run_id IS NOT NULL\n),\nagg_cost as (\n  SELECT \n    workspace_id,\n    job_id,\n    FIRST(run_as, TRUE) as run_as,\n    SUM(list_cost) as list_cost\n  FROM job_run_timeline_with_cost\n  WHERE\n    usage_start_time >= CURRENT_DATE() - INTERVAL 30 DAYS \n  GROUP BY ALL\n  ORDER BY list_cost DESC\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT\n  t1.workspace_id,\n  t5.name, \n  t1.job_id,\n  collect_set(target_table_full_name) as not_used_datasets,\n  array_except(first(t3.populated_sets), collect_set(target_table_full_name)) as used_datasets,\n  first(t4.run_as) as run_as,\n  date(MAX(t2.period_end_time)) as last_seen_job_date,\n  COUNT(DISTINCT t2.run_id) as runs,\n  first(t4.list_cost) as list_cost_30d\nFROM \n  jobs_without_consumption t1 \n    INNER JOIN jobs_with_datasets t3 USING (workspace_id, job_id)\n    LEFT JOIN system.lakeflow.job_run_timeline t2 USING (workspace_id, job_id)\n    LEFT JOIN agg_cost t4 USING (workspace_id, job_id)\n    LEFT JOIN most_recent_jobs t5 USING (workspace_id, job_id)\nGROUP BY ALL\nHAVING runs > 0 -- Exclude old Lineage entries for which we don't have jobs data\nORDER BY list_cost_30d DESC, runs DESC"
     },
     {
-      "name": "751e8342",
+      "name": "ef4e08df",
       "displayName": "highest_change_jobs_7_14_days",
       "query": "with job_run_timeline_with_cost as (\n  SELECT\n    t1.*,\n    t1.usage_metadata.job_id as job_id,\n    t1.identity_metadata.run_as as run_as,\n    t1.usage_quantity * list_prices.pricing.default AS list_cost\n  FROM system.billing.usage t1\n    INNER JOIN system.billing.list_prices list_prices \n      ON\n        t1.cloud = list_prices.cloud AND\n        t1.sku_name = list_prices.sku_name AND\n        t1.usage_start_time >= list_prices.price_start_time AND\n        (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is NULL)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' AND\n    t1.usage_metadata.job_id IS NOT NULL AND\n    t1.usage_metadata.job_run_id IS NOT NULL AND\n    t1.usage_date >= CURRENT_DATE() - INTERVAL 14 DAY\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT\n    t2.name\n    ,t1.workspace_id\n    ,t1.job_id\n    ,t1.sku_name\n    ,t1.run_as\n    ,Last7DaySpend\n    ,Last14DaySpend\n    ,last7DaySpend - last14DaySpend as Last7DayGrowth\n    ,try_divide( (last7DaySpend - last14DaySpend) , last14DaySpend) * 100 AS Last7DayGrowthPct\nFROM\n  (\n    SELECT\n      workspace_id,\n      job_id,\n      run_as,\n      sku_name,\n      SUM(list_cost) AS spend\n      ,SUM(CASE WHEN usage_end_time BETWEEN date_add(current_date(), -8) AND date_add(current_date(), -1) THEN list_cost ELSE 0 END) AS Last7DaySpend\n      ,SUM(CASE WHEN usage_end_time BETWEEN date_add(current_date(), -15) AND date_add(current_date(), -8) THEN list_cost ELSE 0 END) AS Last14DaySpend\n    FROM job_run_timeline_with_cost\n    GROUP BY ALL\n  ) t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nORDER BY \n  Last7DayGrowth DESC \nLIMIT 100"
     },
     {
-      "name": "49278da4",
+      "name": "5626d400",
       "displayName": "cost_per_status_jobs_30_days",
       "query": "with job_run_timeline_with_cost as (\n  SELECT\n    t1.cloud,\n    t1.workspace_id,\n    t2.job_id,\n    t2.run_id,\n    t2.result_state,\n    t1.usage_start_time,\n    t1.usage_end_time,\n    t1.sku_name,\n    t1.usage_unit,\n    t1.usage_quantity,\n    t1.usage_quantity * list_prices.pricing.default AS list_cost\n  FROM system.billing.usage t1\n    INNER JOIN system.lakeflow.job_run_timeline t2\n      ON\n        t1.workspace_id=t2.workspace_id\n        AND t1.usage_metadata.job_id = t2.job_id\n        AND t1.usage_metadata.job_run_id = t2.run_id\n        AND t1.usage_start_time >= date_trunc(\"Hour\", t2.period_start_time)\n        AND t1.usage_start_time < date_trunc(\"Hour\", t2.period_end_time) + INTERVAL 1 HOUR\n    INNER JOIN system.billing.list_prices list_prices \n      ON\n        t1.cloud = list_prices.cloud AND\n        t1.sku_name = list_prices.sku_name AND\n        t1.usage_start_time >= list_prices.price_start_time AND\n        (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is NULL)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n),\ncumulative_run_status_cost as (\n  SELECT\n    workspace_id, \n    job_id,\n    run_id,\n    result_state,\n    usage_start_time,\n    usage_end_time,\n    SUM(list_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_cost\n  FROM job_run_timeline_with_cost\n  ORDER BY workspace_id, job_id, run_id, usage_end_time\n  )\nSELECT\n    workspace_id, \n    job_id,\n    run_id,\n    result_state,\n    usage_start_time,\n    usage_end_time,\n    cumulative_cost - COALESCE(LAG(cumulative_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time), 0) AS result_state_cost\nFROM cumulative_run_status_cost\nWHERE result_state IS NOT NULL\nORDER BY workspace_id, job_id, run_id, usage_end_time"
     },
     {
-      "name": "92de81bb",
+      "name": "44af17d2",
       "displayName": "job_run_cost_agg_30_days",
       "query": "with jobs_usage_with_list_cost as (\n  SELECT\n    t1.*,\n    t1.usage_quantity * list_prices.pricing.default as list_cost\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' \n    AND usage_date >= CURRENT_DATE() - INTERVAL 30 DAYS \n),\njobs_usage_per_workspace as (\n  SELECT\n    workspace_id, \n    SUM(list_cost) as list_cost\n  FROM jobs_usage_with_list_cost\n  GROUP BY ALL\n)\nSELECT \n    t1.workspace_id,\n    COUNT(DISTINCT t1.job_id) as num_jobs,\n    COUNT(DISTINCT t1.run_id) as num_runs,\n    first(t2.list_cost) as list_cost\nFROM system.lakeflow.job_run_timeline t1\n  LEFT JOIN jobs_usage_per_workspace t2 USING (workspace_id)\nWHERE\n  period_start_time >= CURRENT_DATE() - INTERVAL 30 DAYS \nGROUP BY ALL\nORDER BY list_cost DESC\n"
     },
     {
-      "name": "c52fd999",
+      "name": "b27980ab",
       "displayName": "job_run_cost",
       "query": "SELECT\n  t1.*,\n  t1.usage_metadata.job_id as job_id,\n  t1.usage_metadata.job_run_id as run_id,\n  t1.identity_metadata.run_as as run_as,\n  t1.usage_quantity * list_prices.pricing.default AS list_cost\nFROM system.billing.usage t1\n  INNER JOIN system.billing.list_prices list_prices \n    ON\n      t1.cloud = list_prices.cloud AND\n      t1.sku_name = list_prices.sku_name AND\n      t1.usage_start_time >= list_prices.price_start_time AND\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is NULL)\nWHERE\n  t1.sku_name LIKE '%JOBS%' AND\n  t1.usage_metadata.job_id IS NOT NULL AND \n  t1.usage_metadata.job_run_id IS NOT NULL"
     },
     {
-      "name": "76396780",
+      "name": "969e48a3",
       "displayName": "most_expensive_jobs_30_days",
       "query": "with list_cost_per_job as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT \n    t2.name,\n    t1.job_id,\n    t1.workspace_id,\n    t1.runs,\n    t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC"
     },
     {
-      "name": "40b65aad",
+      "name": "bd7704c6",
       "displayName": "outlier_job_runs_30_days",
       "query": "-- SPENDING BROKEN DOWN BY JOB\nwith stats_per_job_run as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.job_run_id as run_id,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen,\n    MIN(t1.usage_start_time) as first_seen\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n      t1.sku_name LIKE '%JOBS%'\n      AND t1.usage_metadata.job_id IS NOT NULL\n      AND t1.usage_metadata.job_run_id IS NOT NULL\n      AND t1.usage_start_time >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY 1,2,3\n), \nstats_per_job AS (\n  SELECT\n    workspace_id,\n    job_id,\n    COUNT(run_id) AS runs,\n    SUM(list_cost) AS total_list_cost,\n    AVG(list_cost) AS avg_list_cost,\n    MAX(list_cost) AS max_list_cost,\n    percentile(list_cost, 0.9) AS p90\n  FROM\n    stats_per_job_run\n  WHERE\n    first_seen > CURRENT_TIMESTAMP() - INTERVAL 30 DAYS\n  GROUP BY ALL\n  ORDER BY\n    total_list_cost DESC\n)\nSELECT\n  *,\n  (max_list_cost - p90) AS list_cost_deviation_from_p90\nFROM\n  stats_per_job\nORDER BY\n  list_cost_deviation_from_p90 DESC"
     },
     {
-      "name": "b76ceec4",
+      "name": "037b8fcc",
       "displayName": "30_60_days_spend",
       "query": "with jobs_usage_with_list_cost as (\n  SELECT\n    t1.*,\n    t1.usage_quantity * list_prices.pricing.default as list_cost\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n)\nSELECT\n    *\n    ,try_divide( (last30DaySpend - last30to60DaySpend) , last30to60DaySpend) * 100 AS Last30DayGrowth\nFROM\n  (\n    SELECT\n      SUM(list_cost) AS spend\n      ,sku_name\n      ,SUM(CASE WHEN usage_end_time BETWEEN date_add(current_date(), -30) AND current_date() THEN list_cost ELSE 0 END) AS Last30DaySpend\n      ,SUM(CASE WHEN usage_end_time BETWEEN date_add(current_date(), -60) AND date_add(current_date(), -31) THEN list_cost ELSE 0 END) AS Last30to60DaySpend\n    FROM jobs_usage_with_list_cost\n    GROUP BY ALL\n  )"
     },
     {
-      "name": "f73300ca",
+      "name": "f380fc44",
       "displayName": "most_expensive_runs_30_days",
       "query": "with list_cost_per_job_run as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.job_run_id as run_id,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_metadata.job_run_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\n\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT \n    t1.workspace_id,\n    t2.name,\n    t1.job_id,\n    t1.run_id,\n     t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job_run t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC"
     },
     {
-      "name": "ca5c4ffc",
+      "name": "1c1a6645",
       "displayName": "highest_failure_jobs_30_days",
       "query": "with job_run_timeline_with_cost as (\n  SELECT\n    t1.*,\n    t1.identity_metadata.run_as as run_as,\n    t2.job_id,\n    t2.run_id,\n    t2.result_state,\n    t1.usage_quantity * list_prices.pricing.default as list_cost\n  FROM system.billing.usage t1\n    INNER JOIN system.lakeflow.job_run_timeline t2\n      ON\n        t1.workspace_id=t2.workspace_id\n        AND t1.usage_metadata.job_id = t2.job_id\n        AND t1.usage_metadata.job_run_id = t2.run_id\n        AND t1.usage_start_time >= date_trunc(\"Hour\", t2.period_start_time)\n        AND t1.usage_start_time < date_trunc(\"Hour\", t2.period_end_time) + INTERVAL 1 HOUR\n    INNER JOIN system.billing.list_prices list_prices on\n      t1.cloud = list_prices.cloud and\n      t1.sku_name = list_prices.sku_name and\n      t1.usage_start_time >= list_prices.price_start_time and\n      (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%' AND \n    t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAYS\n),\ncumulative_run_status_cost as (\n  SELECT\n    workspace_id, \n    job_id,\n    run_id,\n    run_as,\n    result_state,\n    usage_end_time,\n    SUM(list_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_cost\n  FROM job_run_timeline_with_cost\n  ORDER BY workspace_id, job_id, run_id, usage_end_time\n),\ncost_per_status as (\n  SELECT\n      workspace_id, \n      job_id,\n      run_id,\n      run_as,\n      result_state,\n      usage_end_time,\n      cumulative_cost - COALESCE(LAG(cumulative_cost) OVER (ORDER BY workspace_id, job_id, run_id, usage_end_time), 0) AS result_state_cost\n  FROM cumulative_run_status_cost\n  WHERE result_state IS NOT NULL\n  ORDER BY workspace_id, job_id, run_id, usage_end_time),\ncost_per_status_agg as (\n  SELECT\n    workspace_id, \n    job_id,\n    FIRST(run_as, TRUE) as run_as,\n    SUM(result_state_cost) as list_cost\n  FROM cost_per_status\n  WHERE\n    result_state IN ('ERROR', 'FAILED', 'TIMED_OUT')\n  GROUP BY ALL\n),\nterminal_statues as (\n  SELECT\n    workspace_id,\n    job_id,\n    CASE WHEN result_state IN ('ERROR', 'FAILED', 'TIMED_OUT') THEN 1 ELSE 0 END as is_failure,\n    period_end_time as last_seen_date\n  FROM system.lakeflow.job_run_timeline\n  WHERE \n    result_state IS NOT NULL AND\n    period_end_time >= CURRENT_DATE() - INTERVAL 30 DAYS\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT\n  first(t2.name) as name, \n  t1.workspace_id,\n  t1.job_id,\n  COUNT(*) as runs,\n  t3.run_as,\n  SUM(is_failure) as failures,\n  (1 - COALESCE(try_divide(SUM(is_failure), COUNT(*)), 0)) * 100 as success_ratio,\n  first(t3.list_cost) as failure_list_cost,\n  MAX(t1.last_seen_date) as last_seen_date\nFROM terminal_statues t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\n  LEFT JOIN cost_per_status_agg t3 USING (workspace_id, job_id)\nGROUP BY ALL \nORDER BY failures DESC"
     },
     {
-      "name": "4c8f5042",
+      "name": "2a069619",
       "displayName": "job_cost_savings",
       "query": "with list_cost_per_job_cluster as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.cluster_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\tand t1.sku_name not ilike '%jobs_serverless%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\n\njobsrollingmonth as (\nSELECT \n    t2.name,\n    t1.job_id,\n    t1.workspace_id,\n    t1.cluster_id,\n    t1.runs,\n    t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job_cluster t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC ),\n\nclusterutil as (SELECT * from \n\tsystem.compute.node_timeline\nWHERE\n\tstart_time >= CURRENT_DATE() - INTERVAL 30 DAY \n),\n\njobswithutil as (\nselect jobsrollingmonth.workspace_id, jobsrollingmonth.name,\navg(cpu_user_percent + cpu_system_percent) as `Avg CPU Utilization`, \nmax(cpu_user_percent + cpu_system_percent) as `Peak CPU Utilization`, \n\tavg(cpu_wait_percent) as `Avg CPU Disk Wait`,\n\tmax(cpu_wait_percent) as `Max CPU Disk Wait`,\n\tavg(mem_used_percent) as `Avg Memory Utilization`, \n\tmax(mem_used_percent) as `Max Memory Utilization`\nfrom clusterutil \njoin jobsrollingmonth\non clusterutil.cluster_id = jobsrollingmonth.cluster_id\ngroup by 1, 2),\n\nfinalutil as (\n  select jobswithutil.*, sum(jobsrollingmonth.list_cost) as jobcostrolling30\n  from jobswithutil\n  join jobsrollingmonth\n  on jobswithutil.workspace_id = jobsrollingmonth.workspace_id\n  AND jobswithutil.name = jobsrollingmonth.name \n  group by ALL\n)\n\nselect *, ((jobcostrolling30 * (1 - (`Avg CPU Utilization` / 100))) / 2.0) as maxsavings\nfrom finalutil\norder by maxsavings desc\nlimit 25"
     },
     {
-      "name": "4f5b18d5",
+      "name": "00311ac6",
       "displayName": "job_low_cpu",
       "query": "with list_cost_per_job_cluster as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.cluster_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\tand t1.sku_name not ilike '%jobs_serverless%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\n\njobsrollingmonth as (\nSELECT \n    t2.name,\n    t1.job_id,\n    t1.workspace_id,\n    t1.cluster_id,\n    t1.runs,\n    t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job_cluster t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC ),\n\nclusterutil as (SELECT * from \n\tsystem.compute.node_timeline\nWHERE\n\tstart_time >= CURRENT_DATE() - INTERVAL 30 DAY \n),\n\njobswithutil as (\nselect jobsrollingmonth.workspace_id, jobsrollingmonth.name,\navg(cpu_user_percent + cpu_system_percent) as `Avg CPU Utilization`, \nmax(cpu_user_percent + cpu_system_percent) as `Peak CPU Utilization`, \n\tavg(cpu_wait_percent) as `Avg CPU Disk Wait`,\n\tmax(cpu_wait_percent) as `Max CPU Disk Wait`,\n\tavg(mem_used_percent) as `Avg Memory Utilization`, \n\tmax(mem_used_percent) as `Max Memory Utilization`\nfrom clusterutil \njoin jobsrollingmonth\non clusterutil.cluster_id = jobsrollingmonth.cluster_id\ngroup by 1, 2)\n\nselect *\nfrom jobswithutil\norder by `Avg CPU Utilization` asc\nlimit 10"
     },
     {
-      "name": "d34b50d9",
+      "name": "c5747db7",
       "displayName": "job_high_mem",
       "query": "with list_cost_per_job_cluster as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.cluster_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\tand t1.sku_name not ilike '%jobs_serverless%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\n\njobsrollingmonth as (\nSELECT \n    t2.name,\n    t1.job_id,\n    t1.workspace_id,\n    t1.cluster_id,\n    t1.runs,\n    t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job_cluster t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC ),\n\nclusterutil as (SELECT * from \n\tsystem.compute.node_timeline\nWHERE\n\tstart_time >= CURRENT_DATE() - INTERVAL 30 DAY \n),\n\njobswithutil as (\nselect jobsrollingmonth.workspace_id, jobsrollingmonth.name,\navg(cpu_user_percent + cpu_system_percent) as `Avg CPU Utilization`, \nmax(cpu_user_percent + cpu_system_percent) as `Peak CPU Utilization`, \n\tavg(cpu_wait_percent) as `Avg CPU Disk Wait`,\n\tmax(cpu_wait_percent) as `Max CPU Disk Wait`,\n\tavg(mem_used_percent) as `Avg Memory Utilization`, \n\tmax(mem_used_percent) as `Max Memory Utilization`\nfrom clusterutil \njoin jobsrollingmonth\non clusterutil.cluster_id = jobsrollingmonth.cluster_id\ngroup by 1, 2)\n\nselect *\nfrom jobswithutil\norder by `Avg Memory Utilization` desc\nlimit 10"
     },
     {
-      "name": "eef3f640",
+      "name": "ada3a42b",
       "displayName": "spend_by_tag",
       "query": "with tagraw as (\n    select explode(custom_tags) as (llave, val), (usage_quantity * list_prices.pricing.default)\n    as list_cost  \n    from system.billing.usage t1\n    INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n   t1.sku_name LIKE '%JOBS%'\n\t and t1.sku_name not ilike '%jobs_serverless%'\n   and t1.usage_metadata.job_id IS NOT NULL\n   AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY),\n\ntagspend as ( select concat(llave,':',' ', val) as tagbucket, sum(list_cost) as list_cost\nfrom tagraw \ngroup by 1),\n\ncatchall as (select 'catchall' as tagbucket , sum(usage_quantity * list_prices.pricing.default)\nas list_cost  \n    from system.billing.usage t1\n    INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\t and t1.sku_name not ilike '%jobs_serverless%'\n   and t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY\n    and cardinality(custom_tags) = 0  )\n\nselect * from tagspend\nunion all\nselect * from catchall\norder by list_cost desc\nlimit 20"
     },
     {
-      "name": "63c6f949",
+      "name": "fd7461f8",
       "displayName": "job_low_dbr",
       "query": "with list_cost_per_job_cluster as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.cluster_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\tand t1.sku_name not ilike '%jobs_serverless%'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\n\njobsrollingmonth as (\nSELECT \n    t2.name,\n    t1.job_id,\n    t1.workspace_id,\n    t1.cluster_id,\n    t1.runs,\n    t1.run_as,\n    SUM(list_cost) as list_cost,\n    t1.last_seen_date\nFROM list_cost_per_job_cluster t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY ALL\nORDER BY list_cost DESC ),\n\nclusters as (SELECT * from \n\tsystem.compute.clusters\nWHERE\n\tdelete_time is not null\n)\n\nselect clusters.workspace_id, jobsrollingmonth.name, jobsrollingmonth.job_id,\njobsrollingmonth.run_as, sum(jobsrollingmonth.list_cost), any_value(dbr_Version) from \nclusters join jobsrollingmonth\non clusters.cluster_id = jobsrollingmonth.cluster_id\nwhere left(dbr_version, 1) <> '1'\ngroup by 1, 2, 3, 4\n"
     },
     {
-      "name": "1fece272",
+      "name": "bec439a1",
       "displayName": "job_no_scaling",
       "query": "with list_cost_per_job_cluster as (\n  SELECT\n    t1.workspace_id,\n    t1.usage_metadata.job_id,\n    t1.usage_metadata.cluster_id,\n    COUNT(DISTINCT t1.usage_metadata.job_run_id) as runs,\n    SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n    first(identity_metadata.run_as, true) as run_as,\n    first(t1.custom_tags, true) as custom_tags,\n    MAX(t1.usage_end_time) as last_seen_date\n  FROM system.billing.usage t1 \n  INNER JOIN system.billing.list_prices list_prices on\n    t1.cloud = list_prices.cloud and\n    t1.sku_name = list_prices.sku_name and\n    t1.usage_start_time >= list_prices.price_start_time and\n    (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\n  WHERE\n    t1.sku_name LIKE '%JOBS%'\n\t  AND t1.sku_name NOT LIKE '%SERVERLESS'\n    AND t1.usage_metadata.job_id IS NOT NULL\n    AND t1.usage_metadata.cluster_id IS NOT NULL\n    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \n  GROUP BY ALL\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\njob_runs_enhanced as (\n  SELECT \n      t2.name,\n      t1.job_id,\n      t1.workspace_id,\n      t1.cluster_id,\n      t1.runs,\n      t1.run_as,\n      SUM(list_cost) as list_cost,\n      t1.last_seen_date\n  FROM list_cost_per_job_cluster t1 \n    LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\n  GROUP BY ALL\n  ORDER BY list_cost DESC\n),\nclusters as (\n  SELECT \n    *,\n    ROW_NUMBER() OVER(PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) as rn\n  FROM \n    system.compute.clusters\n  WHERE\n    cluster_source=\"JOB\"\n  QUALIFY rn=1\n)\nSELECT\n  clusters.workspace_id,\n  jobs.job_id,\n  first(jobs.name) as name,\n  first(jobs.run_as) as run_as,\n  SUM(jobs.list_cost) as list_cost,\n  first(worker_count) as worker_count,\n  first(min_autoscale_workers) as min_autoscale_workers,\n  first(max_autoscale_workers) as max_autoscale_workers\nFROM clusters\n JOIN job_runs_enhanced jobs USING(workspace_id, cluster_id)\nWHERE\n  (min_autoscale_workers is NULL OR max_autoscale_workers is NULL)\n  and worker_count > 1\nGROUP BY 1,2\nORDER BY list_cost DESC"
     },
     {
-      "name": "46760d91",
+      "name": "a3629936",
       "displayName": "jobs_no_tags",
       "query": "with most_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n),\n\nrunlast30 as (\n\n  select * from system.lakeflow.job_run_timeline\n  where period_end_time > CURRENT_DATE - INTERVAL 30 DAY\n)\n\n\nselect most_recent_jobs.workspace_id, name, any_value(most_recent_jobs.job_id), \nany_value(tags), any_value(run_as) from most_recent_jobs\njoin runlast30\non most_recent_jobs.job_id = runlast30.job_id\nwhere cardinality(tags) = 0 \ngroup by all\n"
     },
     {
-      "name": "072a52cf",
+      "name": "07667893",
       "displayName": "jobs_ap_clusters",
       "query": "with clusters AS (\n  SELECT\n    *,\n    ROW_NUMBER() OVER(PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) as rn\n  FROM system.compute.clusters\n  WHERE cluster_source=\"UI\"\n  QUALIFY rn=1\n),\njob_tasks_exploded AS (\n  SELECT\n    workspace_id,\n    job_id,\n    EXPLODE(compute_ids) as cluster_id\n  FROM system.lakeflow.job_task_run_timeline\n  WHERE period_start_time >= CURRENT_DATE() - INTERVAL 30 DAY \n),\nall_purpose_cluster_jobs AS (\n  SELECT\n    t1.*,\n    t2.cluster_name,\n    t2.owned_by,\n    t2.dbr_version\n  FROM job_tasks_exploded t1 \n    INNER JOIN clusters t2 USING (workspace_id, cluster_id)\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n)\nSELECT \n  t1.workspace_id,\n  t1.job_id,\n  first(t2.name, TRUE) as name,\n  array_size(collect_list(t1.cluster_id)) as task_runs,\n  collect_set(\n    named_struct(\n      'cluster_id', t1.cluster_id,\n      'cluster_name', t1.cluster_name\n    )\n  ) as clusters_list\nFROM all_purpose_cluster_jobs t1 \n  LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\nGROUP BY t1.workspace_id, t1.job_id \nORDER BY task_runs DESC\nLIMIT 100;"
     },
     {
-      "name": "927f3c55",
+      "name": "bac62f64",
       "displayName": "ap_clusters_by_jobs",
       "query": "with clusters AS (\n  SELECT\n    *,\n    ROW_NUMBER() OVER(PARTITION BY workspace_id, cluster_id ORDER BY change_time DESC) as rn\n  FROM system.compute.clusters\n  WHERE cluster_source=\"UI\"\n  QUALIFY rn=1\n),\njob_tasks_exploded AS (\n  SELECT\n    workspace_id,\n    job_id,\n    EXPLODE(compute_ids) as cluster_id\n  FROM system.lakeflow.job_task_run_timeline\n  WHERE period_start_time >= CURRENT_DATE() - INTERVAL 30 DAY \n),\nall_purpose_cluster_jobs AS (\n  SELECT\n    t1.*,\n    t2.cluster_name,\n    t2.owned_by,\n    t2.dbr_version\n  FROM job_tasks_exploded t1 \n    INNER JOIN clusters t2 USING (workspace_id, cluster_id)\n),\nmost_recent_jobs as (\n  SELECT \n    *, \n    ROW_NUMBER() OVER(PARTITION BY workspace_id, job_id ORDER BY change_time DESC) as rn\n  FROM\n    system.lakeflow.jobs QUALIFY rn=1\n-- )\n),\nap_clusters_by_jobs as (\n  SELECT \n    t1.workspace_id,\n    t1.cluster_id,\n    first(t1.cluster_name, TRUE) as cluster_name,\n    array_size(collect_list(t1.cluster_id)) as task_runs,\n    collect_set(\n      named_struct(\n        'job_id', t1.job_id,\n        'job_name', t2.name\n      )\n    ) as jobs_list\n  FROM all_purpose_cluster_jobs t1 \n    LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\n  GROUP BY t1.workspace_id, t1.cluster_id \n  ORDER BY task_runs DESC\n  LIMIT 100\n)\nSELECT\n  t1.workspace_id,\n  t1.usage_metadata.cluster_id,\n  first(t2.cluster_name, TRUE) as cluster_name,\n  first(t2.task_runs) as task_runs,\n  SUM(t1.usage_quantity * list_prices.pricing.default) as list_cost,\n  first(t2.jobs_list) as jobs_list,\n  MAX(t1.usage_end_time) as last_seen_date\nFROM system.billing.usage t1 \nINNER JOIN system.billing.list_prices list_prices on\n  t1.cloud = list_prices.cloud and\n  t1.sku_name = list_prices.sku_name and\n  t1.usage_start_time >= list_prices.price_start_time and\n  (t1.usage_end_time <= list_prices.price_end_time or list_prices.price_end_time is null)\nINNER JOIN ap_clusters_by_jobs t2 ON t1.workspace_id=t2.workspace_id AND t1.usage_metadata.cluster_id=t2.cluster_id\nWHERE usage_date >= CURRENT_DATE() - INTERVAL 30 DAY \nGROUP BY ALL\nORDER BY list_cost DESC"
     },
     {
-      "name": "b3782da4",
+      "name": "5d3d07f8",
       "displayName": "[SELECT] Yes/No for interactive clusters",
       "queryLines": [
         "select explode(array(\n",
@@ -121,7 +121,7 @@
       ]
     },
     {
-      "name": "857a3150",
+      "name": "97aec557",
       "displayName": "[SELECT] Time key",
       "queryLines": [
         "select\n",
@@ -129,7 +129,7 @@
       ]
     },
     {
-      "name": "601a6ec0",
+      "name": "a777bb8d",
       "displayName": "[SELECT] Workspace IDs",
       "queryLines": [
         "with \n",
@@ -141,8 +141,8 @@
         "  from\n",
         "    system.billing.usage as u\n",
         "  where\n",
-        "    u.usage_date between :param_start_date_2560eaca\n",
-        "    and :param_end_date_2560eaca\n",
+        "    u.usage_date between :param_start_date_c428ed54\n",
+        "    and :param_end_date_c428ed54\n",
         "),\n",
         "-- query\n",
         "workspace_selection as (\n",
@@ -159,7 +159,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -174,7 +174,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -190,7 +190,7 @@
       ]
     },
     {
-      "name": "d289dc68",
+      "name": "907184c7",
       "displayName": "[SELECT] Run as",
       "queryLines": [
         "with usage_filtered_by_date as (\n",
@@ -199,7 +199,7 @@
         "  from\n",
         "    system.billing.usage\n",
         "  where\n",
-        "    usage_date between :param_start_date_2560eaca and :param_end_date_2560eaca\n",
+        "    usage_date between :param_start_date_c428ed54 and :param_end_date_c428ed54\n",
         ")\n",
         "SELECT\n",
         "  *\n",
@@ -211,7 +211,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -226,7 +226,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -242,7 +242,7 @@
       ]
     },
     {
-      "name": "08ff3845",
+      "name": "60b8c1cc",
       "displayName": "[SELECT] Cluster type",
       "queryLines": [
         "select\n",
@@ -250,14 +250,14 @@
       ]
     },
     {
-      "name": "84fd86c9",
+      "name": "b65038eb",
       "displayName": "default usage copy-paste selection",
       "queryLines": [
         ""
       ]
     },
     {
-      "name": "620b56fa",
+      "name": "701c8651",
       "displayName": "[Overview] Top N Jobs & Pipelines",
       "queryLines": [
         "-- eval tags param\n",
@@ -266,9 +266,9 @@
         "    explode(\n",
         "      split(\n",
         "        if(\n",
-        "          trim(:param_single_tag_key_2560eaca) = '<USE TAG FILTER>',\n",
-        "          :param_tag_entries_2560eaca,\n",
-        "          :param_single_tag_key_2560eaca\n",
+        "          trim(:param_single_tag_key_c428ed54) = '<USE TAG FILTER>',\n",
+        "          :param_tag_entries_c428ed54,\n",
+        "          :param_single_tag_key_c428ed54\n",
         "        ),\n",
         "        ';'\n",
         "      )\n",
@@ -314,24 +314,24 @@
         "          )\n",
         "        )\n",
         "        AND (\n",
-        "          usage_date BETWEEN :param_start_date_2560eaca\n",
-        "          AND :param_end_date_2560eaca\n",
+        "          usage_date BETWEEN :param_start_date_c428ed54\n",
+        "          AND :param_end_date_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_workspace_2560eaca = '<ALL WORKSPACES>',\n",
+        "          :param_workspace_c428ed54 = '<ALL WORKSPACES>',\n",
         "          true,\n",
-        "          workspace_name = :param_workspace_2560eaca\n",
+        "          workspace_name = :param_workspace_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_run_as_2560eaca = '<ALL USERS>',\n",
+        "          :param_run_as_c428ed54 = '<ALL USERS>',\n",
         "          true,\n",
-        "          identity_metadata.run_as = :param_run_as_2560eaca\n",
+        "          identity_metadata.run_as = :param_run_as_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "          :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "          true,\n",
         "          IF(\n",
-        "            :param_cluster_type_2560eaca = 'Serverless',\n",
+        "            :param_cluster_type_c428ed54 = 'Serverless',\n",
         "            product_features.is_serverless = TRUE,\n",
         "            product_features.is_serverless = FALSE\n",
         "          )\n",
@@ -339,10 +339,10 @@
         "    )\n",
         "  WHERE\n",
         "    IF(\n",
-        "      :param_object_type_2560eaca = '<ALL>',\n",
+        "      :param_object_type_c428ed54 = '<ALL>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_object_type_2560eaca = 'Jobs',\n",
+        "        :param_object_type_c428ed54 = 'Jobs',\n",
         "        entity_type RLIKE \"JOB\",\n",
         "        entity_type RLIKE \"PIPELINE\"\n",
         "      )\n",
@@ -375,7 +375,7 @@
         "  where\n",
         "    (\n",
         "      custom_tag_key_value_pairs != '<MISMATCH>'\n",
-        "      OR trim(:param_tag_entries_2560eaca) = '<ANY>'\n",
+        "      OR trim(:param_tag_entries_c428ed54) = '<ANY>'\n",
         "    )\n",
         "),\n",
         "list_cost_per_job as (\n",
@@ -458,7 +458,7 @@
         "ORDER BY\n",
         "  list_cost DESC\n",
         "LIMIT\n",
-        "  :param_top_n_2560eaca\n",
+        "  :param_top_n_c428ed54\n",
         ")\n",
         "SELECT\n",
         "    coalesce(CONCAT(\n",
@@ -497,7 +497,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -512,7 +512,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -527,7 +527,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -542,7 +542,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_run_as",
-          "keyword": "param_run_as_2560eaca",
+          "keyword": "param_run_as_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -557,7 +557,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -572,7 +572,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_object_type",
-          "keyword": "param_object_type_2560eaca",
+          "keyword": "param_object_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -587,7 +587,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_tag_entries",
-          "keyword": "param_tag_entries_2560eaca",
+          "keyword": "param_tag_entries_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -602,7 +602,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_single_tag_key",
-          "keyword": "param_single_tag_key_2560eaca",
+          "keyword": "param_single_tag_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -617,7 +617,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_top_n",
-          "keyword": "param_top_n_2560eaca",
+          "keyword": "param_top_n_c428ed54",
           "dataType": "INTEGER",
           "defaultSelection": {
             "values": {
@@ -633,7 +633,7 @@
       ]
     },
     {
-      "name": "cec11b61",
+      "name": "7c56b45b",
       "displayName": "[Overview] Top N Job Runs & Pipeline Executions",
       "queryLines": [
         "-- eval tags param\n",
@@ -642,9 +642,9 @@
         "    explode(\n",
         "      split(\n",
         "        if(\n",
-        "          trim(:param_single_tag_key_2560eaca) = '<USE TAG FILTER>',\n",
-        "          :param_tag_entries_2560eaca,\n",
-        "          :param_single_tag_key_2560eaca\n",
+        "          trim(:param_single_tag_key_c428ed54) = '<USE TAG FILTER>',\n",
+        "          :param_tag_entries_c428ed54,\n",
+        "          :param_single_tag_key_c428ed54\n",
         "        ),\n",
         "        ';'\n",
         "      )\n",
@@ -690,24 +690,24 @@
         "          )\n",
         "        )\n",
         "        AND (\n",
-        "          usage_date BETWEEN :param_start_date_2560eaca\n",
-        "          AND :param_end_date_2560eaca\n",
+        "          usage_date BETWEEN :param_start_date_c428ed54\n",
+        "          AND :param_end_date_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_workspace_2560eaca = '<ALL WORKSPACES>',\n",
+        "          :param_workspace_c428ed54 = '<ALL WORKSPACES>',\n",
         "          true,\n",
-        "          workspace_name = :param_workspace_2560eaca\n",
+        "          workspace_name = :param_workspace_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_run_as_2560eaca = '<ALL USERS>',\n",
+        "          :param_run_as_c428ed54 = '<ALL USERS>',\n",
         "          true,\n",
-        "          identity_metadata.run_as = :param_run_as_2560eaca\n",
+        "          identity_metadata.run_as = :param_run_as_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "          :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "          true,\n",
         "          IF(\n",
-        "            :param_cluster_type_2560eaca = 'Serverless',\n",
+        "            :param_cluster_type_c428ed54 = 'Serverless',\n",
         "            product_features.is_serverless = TRUE,\n",
         "            product_features.is_serverless = FALSE\n",
         "          )\n",
@@ -715,10 +715,10 @@
         "    )\n",
         "  WHERE\n",
         "    IF(\n",
-        "      :param_object_type_2560eaca = '<ALL>',\n",
+        "      :param_object_type_c428ed54 = '<ALL>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_object_type_2560eaca = 'Jobs',\n",
+        "        :param_object_type_c428ed54 = 'Jobs',\n",
         "        entity_type RLIKE \"JOB\",\n",
         "        entity_type RLIKE \"PIPELINE\"\n",
         "      )\n",
@@ -751,7 +751,7 @@
         "  where\n",
         "    (\n",
         "      custom_tag_key_value_pairs != '<MISMATCH>'\n",
-        "      OR trim(:param_tag_entries_2560eaca) = '<ANY>'\n",
+        "      OR trim(:param_tag_entries_c428ed54) = '<ANY>'\n",
         "    )\n",
         "),\n",
         "list_cost_per_job as (\n",
@@ -834,7 +834,7 @@
         "ORDER BY\n",
         "  list_cost DESC\n",
         "LIMIT\n",
-        "  :param_top_n_2560eaca\n",
+        "  :param_top_n_c428ed54\n",
         ")\n",
         "SELECT\n",
         "    coalesce(CONCAT(\n",
@@ -873,7 +873,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -888,7 +888,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -903,7 +903,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -918,7 +918,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_run_as",
-          "keyword": "param_run_as_2560eaca",
+          "keyword": "param_run_as_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -933,7 +933,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -948,7 +948,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_object_type",
-          "keyword": "param_object_type_2560eaca",
+          "keyword": "param_object_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -963,7 +963,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_tag_entries",
-          "keyword": "param_tag_entries_2560eaca",
+          "keyword": "param_tag_entries_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -978,7 +978,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_single_tag_key",
-          "keyword": "param_single_tag_key_2560eaca",
+          "keyword": "param_single_tag_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -993,7 +993,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_top_n",
-          "keyword": "param_top_n_2560eaca",
+          "keyword": "param_top_n_c428ed54",
           "dataType": "INTEGER",
           "defaultSelection": {
             "values": {
@@ -1009,7 +1009,7 @@
       ]
     },
     {
-      "name": "850b4e73",
+      "name": "7f7b04d1",
       "displayName": "[SELECT] Object type",
       "queryLines": [
         "select\n",
@@ -1017,7 +1017,7 @@
       ]
     },
     {
-      "name": "28988314",
+      "name": "17d00951",
       "displayName": "[SELECT] Tag key",
       "queryLines": [
         "with usage_with_restrictions AS (\n",
@@ -1049,24 +1049,24 @@
         "          )\n",
         "        )\n",
         "        AND (\n",
-        "          usage_date BETWEEN :param_start_date_2560eaca\n",
-        "          AND :param_end_date_2560eaca\n",
+        "          usage_date BETWEEN :param_start_date_c428ed54\n",
+        "          AND :param_end_date_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_workspace_2560eaca = '<ALL WORKSPACES>',\n",
+        "          :param_workspace_c428ed54 = '<ALL WORKSPACES>',\n",
         "          true,\n",
-        "          workspace_id = :param_workspace_2560eaca\n",
+        "          workspace_id = :param_workspace_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_run_as_2560eaca = '<ALL USERS>',\n",
+        "          :param_run_as_c428ed54 = '<ALL USERS>',\n",
         "          true,\n",
-        "          identity_metadata.run_as = :param_run_as_2560eaca\n",
+        "          identity_metadata.run_as = :param_run_as_c428ed54\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "          :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "          true,\n",
         "          IF(\n",
-        "            :param_run_as_2560eaca = 'Serverless',\n",
+        "            :param_run_as_c428ed54 = 'Serverless',\n",
         "            product_features.is_serverless = TRUE,\n",
         "            product_features.is_serverless = FALSE\n",
         "          )\n",
@@ -1074,10 +1074,10 @@
         "    )\n",
         "  WHERE\n",
         "    IF(\n",
-        "      :param_object_type_2560eaca = '<ALL>',\n",
+        "      :param_object_type_c428ed54 = '<ALL>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_object_type_2560eaca = 'Jobs',\n",
+        "        :param_object_type_c428ed54 = 'Jobs',\n",
         "        entity_type RLIKE \"JOB\",\n",
         "        entity_type RLIKE \"PIPELINE\"\n",
         "      )\n",
@@ -1098,7 +1098,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1113,7 +1113,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1128,7 +1128,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1143,7 +1143,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_run_as",
-          "keyword": "param_run_as_2560eaca",
+          "keyword": "param_run_as_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1158,7 +1158,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1173,7 +1173,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_object_type",
-          "keyword": "param_object_type_2560eaca",
+          "keyword": "param_object_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1189,7 +1189,7 @@
       ]
     },
     {
-      "name": "41a18ebd",
+      "name": "e13b55f5",
       "displayName": "[Overview] usage overview",
       "queryLines": [
         "with \n",
@@ -1201,8 +1201,8 @@
         "  from\n",
         "    system.billing.usage as u left JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  where\n",
-        "    u.usage_date between :param_start_date_2560eaca\n",
-        "    and :param_end_date_2560eaca\n",
+        "    u.usage_date between :param_start_date_c428ed54\n",
+        "    and :param_end_date_c428ed54\n",
         "    AND (\n",
         "      billing_origin_product IN (\"JOBS\", \"DLT\", \"LAKEFLOW_CONNECT\")\n",
         "      OR (\n",
@@ -1211,15 +1211,15 @@
         "      )\n",
         "    )\n",
         "    AND if(\n",
-        "      :param_workspace_2560eaca = '<ALL WORKSPACES>',\n",
+        "      :param_workspace_c428ed54 = '<ALL WORKSPACES>',\n",
         "      true,\n",
-        "      workspace_name = :param_workspace_2560eaca\n",
+        "      workspace_name = :param_workspace_c428ed54\n",
         "    )\n",
         "    AND IF(\n",
-        "      :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "      :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_cluster_type_2560eaca = 'Serverless',\n",
+        "        :param_cluster_type_c428ed54 = 'Serverless',\n",
         "        product_features.is_serverless = TRUE,\n",
         "        product_features.is_serverless = FALSE\n",
         "      )\n",
@@ -1256,9 +1256,9 @@
         "  select\n",
         "    identifier (\n",
         "      case\n",
-        "        when :param_time_key_2560eaca = 'Quarter' then 'usage_quarter'\n",
-        "        when :param_time_key_2560eaca = 'Month' then 'usage_month'\n",
-        "        when :param_time_key_2560eaca = 'Week' then 'usage_week'\n",
+        "        when :param_time_key_c428ed54 = 'Quarter' then 'usage_quarter'\n",
+        "        when :param_time_key_c428ed54 = 'Month' then 'usage_month'\n",
+        "        when :param_time_key_c428ed54 = 'Week' then 'usage_week'\n",
         "        else 'usage_date'\n",
         "      end\n",
         "    ) as time_key,\n",
@@ -1296,9 +1296,9 @@
         "    ) as workspace_norm,\n",
         "    identifier (\n",
         "      case\n",
-        "        when :param_group_key_2560eaca = 'Workspace' then 'workspace_norm'\n",
-        "        when :param_group_key_2560eaca = 'SKU' then 'sku_name'\n",
-        "        when :param_group_key_2560eaca = 'Serverless' then 'product_features.is_serverless'\n",
+        "        when :param_group_key_c428ed54 = 'Workspace' then 'workspace_norm'\n",
+        "        when :param_group_key_c428ed54 = 'SKU' then 'sku_name'\n",
+        "        when :param_group_key_c428ed54 = 'Serverless' then 'product_features.is_serverless'\n",
         "        else 'billing_origin_product'\n",
         "      end\n",
         "    ) as group_key,\n",
@@ -1318,7 +1318,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1333,7 +1333,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1348,7 +1348,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1363,7 +1363,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_time_key",
-          "keyword": "param_time_key_2560eaca",
+          "keyword": "param_time_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1378,7 +1378,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_group_key",
-          "keyword": "param_group_key_2560eaca",
+          "keyword": "param_group_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1393,7 +1393,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1409,7 +1409,7 @@
       ]
     },
     {
-      "name": "09f059ed",
+      "name": "4e768f5c",
       "displayName": "[SELECT] Group key",
       "queryLines": [
         "select\n",
@@ -1417,7 +1417,7 @@
       ]
     },
     {
-      "name": "54fde594",
+      "name": "0999e6d6",
       "displayName": "[Overview] Daily Finished Jobs",
       "queryLines": [
         "with job_runs AS (\n",
@@ -1430,16 +1430,16 @@
         "  FROM\n",
         "    system.lakeflow.job_run_timeline t1 left JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  WHERE\n",
-        "    (period_end_time BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
-        "    AND IF(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_2560eaca)\n",
+        "    (period_end_time BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
+        "    AND IF(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_c428ed54)\n",
         ")\n",
         "SELECT\n",
         "  identifier(\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Quarter' then 'usage_quarter'\n",
-        "      when :param_time_key_2560eaca = 'Month' then 'usage_month'\n",
-        "      when :param_time_key_2560eaca = 'Week' then 'usage_week'\n",
-        "      when :param_time_key_2560eaca = 'Day' then 'usage_day'\n",
+        "      when :param_time_key_c428ed54 = 'Quarter' then 'usage_quarter'\n",
+        "      when :param_time_key_c428ed54 = 'Month' then 'usage_month'\n",
+        "      when :param_time_key_c428ed54 = 'Week' then 'usage_week'\n",
+        "      when :param_time_key_c428ed54 = 'Day' then 'usage_day'\n",
         "      else 'usage_day'\n",
         "    end\n",
         "  ) as time_key,\n",
@@ -1450,7 +1450,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1465,7 +1465,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1480,7 +1480,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1495,7 +1495,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_time_key",
-          "keyword": "param_time_key_2560eaca",
+          "keyword": "param_time_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1511,7 +1511,7 @@
       ]
     },
     {
-      "name": "39eff547",
+      "name": "82adb186",
       "displayName": "[Overview] Cost per job run status",
       "queryLines": [
         "with job_run_timeline_with_cost as (\n",
@@ -1549,26 +1549,26 @@
         "          or list_prices.price_end_time is NULL\n",
         "        )\n",
         "        AND IF(\n",
-        "          :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "          :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "          true,\n",
         "          IF(\n",
-        "            :param_cluster_type_2560eaca = 'Serverless',\n",
+        "            :param_cluster_type_c428ed54 = 'Serverless',\n",
         "            product_features.is_serverless = TRUE,\n",
         "            product_features.is_serverless = FALSE\n",
         "          )\n",
         "        )\n",
         "        LEFT JOIN system.access.workspaces_latest USING (workspace_id)\n",
         "  WHERE\n",
-        "    (usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
-        "    AND IF(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t1.workspace_id = :param_workspace_2560eaca)\n",
+        "    (usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
+        "    AND IF(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t1.workspace_id = :param_workspace_c428ed54)\n",
         "),\n",
         "job_run_timeline_with_time_key as (\n",
         "  SELECT\n",
         "    identifier(\n",
         "      case\n",
-        "        when :param_time_key_2560eaca = 'Quarter' then 'usage_quarter'\n",
-        "        when :param_time_key_2560eaca = 'Month' then 'usage_month'\n",
-        "        when :param_time_key_2560eaca = 'Week' then 'usage_week'\n",
+        "        when :param_time_key_c428ed54 = 'Quarter' then 'usage_quarter'\n",
+        "        when :param_time_key_c428ed54 = 'Month' then 'usage_month'\n",
+        "        when :param_time_key_c428ed54 = 'Week' then 'usage_week'\n",
         "        else 'usage_date'\n",
         "      end\n",
         "    ) as time_key,\n",
@@ -1620,7 +1620,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1635,7 +1635,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -1650,7 +1650,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1665,7 +1665,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_time_key",
-          "keyword": "param_time_key_2560eaca",
+          "keyword": "param_time_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1680,7 +1680,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -1696,7 +1696,7 @@
       ]
     },
     {
-      "name": "d12aaf12",
+      "name": "7435743e",
       "displayName": "[Static Text]",
       "queryLines": [
         "select\n",
@@ -1706,7 +1706,7 @@
       ]
     },
     {
-      "name": "00eaa807",
+      "name": "ffb5f83b",
       "displayName": "[SELECT] Display by",
       "queryLines": [
         "select\n",
@@ -1714,7 +1714,7 @@
       ]
     },
     {
-      "name": "11ebd01b",
+      "name": "14fd5035",
       "displayName": "[Search] Jobs & Pipelines",
       "queryLines": [
         "-- eval tags param\n",
@@ -1723,9 +1723,9 @@
         "    explode(\n",
         "      split(\n",
         "        if(\n",
-        "          trim(:param_single_tag_key_2560eaca) = '<USE TAG FILTER>',\n",
-        "          :param_tag_entries_2560eaca,\n",
-        "          :param_single_tag_key_2560eaca\n",
+        "          trim(:param_single_tag_key_c428ed54) = '<USE TAG FILTER>',\n",
+        "          :param_tag_entries_c428ed54,\n",
+        "          :param_single_tag_key_c428ed54\n",
         "        ),\n",
         "        ';'\n",
         "      )\n",
@@ -1770,13 +1770,13 @@
         "            AND usage_metadata.dlt_pipeline_id IS NOT NULL\n",
         "          )\n",
         "        )\n",
-        "        AND (usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
-        "        AND IF(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, :param_workspace_2560eaca RLIKE workspace_id)\n",
+        "        AND (usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
+        "        AND IF(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, :param_workspace_c428ed54 RLIKE workspace_id)\n",
         "        AND IF(\n",
-        "          :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "          :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "          true,\n",
         "          IF(\n",
-        "            :param_cluster_type_2560eaca = 'Serverless',\n",
+        "            :param_cluster_type_c428ed54 = 'Serverless',\n",
         "            product_features.is_serverless = TRUE,\n",
         "            product_features.is_serverless = FALSE\n",
         "          )\n",
@@ -1784,9 +1784,9 @@
         "    )\n",
         "  WHERE\n",
         "    IF(\n",
-        "      :param_object_type_2560eaca = '<ALL>',\n",
+        "      :param_object_type_c428ed54 = '<ALL>',\n",
         "      true,\n",
-        "      IF(:param_object_type_2560eaca = 'Jobs', entity_type RLIKE \"JOB\", entity_type RLIKE \"PIPELINE\")\n",
+        "      IF(:param_object_type_c428ed54 = 'Jobs', entity_type RLIKE \"JOB\", entity_type RLIKE \"PIPELINE\")\n",
         "    )\n",
         "),\n",
         "filtered_usage AS (\n",
@@ -1814,7 +1814,7 @@
         "  where\n",
         "    (\n",
         "      custom_tag_key_value_pairs != '<MISMATCH>'\n",
-        "      OR trim(:param_tag_entries_2560eaca) = '<ANY>'\n",
+        "      OR trim(:param_tag_entries_c428ed54) = '<ANY>'\n",
         "    )\n",
         "),\n",
         "list_cost_per_job as (\n",
@@ -1913,8 +1913,8 @@
         "  SELECT\n",
         "    identifier(\n",
         "      case\n",
-        "        when :param_order_by_2560eaca RLIKE 'usage' then 'list_cost'\n",
-        "        when :param_order_by_2560eaca RLIKE 'duration' then 'run_time'\n",
+        "        when :param_order_by_c428ed54 RLIKE 'usage' then 'list_cost'\n",
+        "        when :param_order_by_c428ed54 RLIKE 'duration' then 'run_time'\n",
         "        else 'last_seen_date'\n",
         "      end\n",
         "    ) as time_key,\n",
@@ -1925,7 +1925,7 @@
         "output as (\n",
         "  SELECT\n",
         "    CASE\n",
-        "      WHEN :param_order_by_2560eaca RLIKE 'DESC' then CAST(time_key as LONG)\n",
+        "      WHEN :param_order_by_c428ed54 RLIKE 'DESC' then CAST(time_key as LONG)\n",
         "      ELSE CAST(time_key as LONG) * -1\n",
         "    END as ordered_time_key,\n",
         "    REPLACE(\n",
@@ -1935,15 +1935,15 @@
         "  FROM\n",
         "    final_result_with_order_by\n",
         "  WHERE\n",
-        "    IF(:param_run_as_2560eaca = '<ALL USERS>', true, run_as = :param_run_as_2560eaca)\n",
-        "    AND IF(:param_name_2560eaca = '<ANY>', true, name RLIKE :param_name_2560eaca)\n",
-        "    AND IF(:param_id_2560eaca = '<ANY>', true, entity_id RLIKE :param_id_2560eaca)\n",
-        "    AND IF(:param_run_id_2560eaca = '<ANY>', true, run_id RLIKE :param_run_id_2560eaca)\n",
-        "    AND list_cost >= :param_usage_2560eaca\n",
-        "    AND CAST(run_time AS LONG) >= :param_duration_2560eaca\n",
+        "    IF(:param_run_as_c428ed54 = '<ALL USERS>', true, run_as = :param_run_as_c428ed54)\n",
+        "    AND IF(:param_name_c428ed54 = '<ANY>', true, name RLIKE :param_name_c428ed54)\n",
+        "    AND IF(:param_id_c428ed54 = '<ANY>', true, entity_id RLIKE :param_id_c428ed54)\n",
+        "    AND IF(:param_run_id_c428ed54 = '<ANY>', true, run_id RLIKE :param_run_id_c428ed54)\n",
+        "    AND list_cost >= :param_usage_c428ed54\n",
+        "    AND CAST(run_time AS LONG) >= :param_duration_c428ed54\n",
         "  ORDER BY\n",
         "    ordered_time_key DESC\n",
-        "  LIMIT :param_top_n_2560eaca\n",
+        "  LIMIT :param_top_n_c428ed54\n",
         ")\n",
         "SELECT\n",
         "  coalesce(\n",
@@ -1986,7 +1986,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -2001,7 +2001,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -2016,7 +2016,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2031,7 +2031,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2046,7 +2046,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_object_type",
-          "keyword": "param_object_type_2560eaca",
+          "keyword": "param_object_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2061,7 +2061,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_tag_entries",
-          "keyword": "param_tag_entries_2560eaca",
+          "keyword": "param_tag_entries_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2076,7 +2076,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_single_tag_key",
-          "keyword": "param_single_tag_key_2560eaca",
+          "keyword": "param_single_tag_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2091,7 +2091,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_order_by",
-          "keyword": "param_order_by_2560eaca",
+          "keyword": "param_order_by_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2106,7 +2106,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_run_as",
-          "keyword": "param_run_as_2560eaca",
+          "keyword": "param_run_as_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2121,7 +2121,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_name",
-          "keyword": "param_name_2560eaca",
+          "keyword": "param_name_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2136,7 +2136,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_id",
-          "keyword": "param_id_2560eaca",
+          "keyword": "param_id_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2151,7 +2151,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_run_id",
-          "keyword": "param_run_id_2560eaca",
+          "keyword": "param_run_id_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2166,7 +2166,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_usage",
-          "keyword": "param_usage_2560eaca",
+          "keyword": "param_usage_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2181,7 +2181,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_duration",
-          "keyword": "param_duration_2560eaca",
+          "keyword": "param_duration_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2196,7 +2196,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_top_n",
-          "keyword": "param_top_n_2560eaca",
+          "keyword": "param_top_n_c428ed54",
           "dataType": "INTEGER",
           "defaultSelection": {
             "values": {
@@ -2212,7 +2212,7 @@
       ]
     },
     {
-      "name": "1e5eff70",
+      "name": "758d8186",
       "displayName": "[SELECT] Order by",
       "queryLines": [
         "select\n",
@@ -2222,7 +2222,7 @@
       ]
     },
     {
-      "name": "e995b5c4",
+      "name": "ef74594b",
       "displayName": "[Overview] Most Expensive Resources Over Time",
       "queryLines": [
         "with most_recent_jobs as (\n",
@@ -2263,7 +2263,7 @@
         "  from\n",
         "    system.billing.usage as u LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  where\n",
-        "    u.usage_date between :param_start_date_2560eaca and :param_end_date_2560eaca\n",
+        "    u.usage_date between :param_start_date_c428ed54 and :param_end_date_c428ed54\n",
         "    AND (\n",
         "      billing_origin_product IN (\"JOBS\", \"DLT\", \"LAKEFLOW_CONNECT\")\n",
         "      OR (\n",
@@ -2272,15 +2272,15 @@
         "      )\n",
         "    )\n",
         "    AND IF(\n",
-        "      :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "      :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_cluster_type_2560eaca = 'Serverless',\n",
+        "        :param_cluster_type_c428ed54 = 'Serverless',\n",
         "        product_features.is_serverless = TRUE,\n",
         "        product_features.is_serverless = FALSE\n",
         "      )\n",
         "    )\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_c428ed54)\n",
         "),\n",
         "-- calc list priced usage in USD\n",
         "prices as (\n",
@@ -2330,9 +2330,9 @@
         "  select\n",
         "    identifier(\n",
         "      case\n",
-        "        when :param_time_key_2560eaca = 'Quarter' then 'usage_quarter'\n",
-        "        when :param_time_key_2560eaca = 'Month' then 'usage_month'\n",
-        "        when :param_time_key_2560eaca = 'Week' then 'usage_week'\n",
+        "        when :param_time_key_c428ed54 = 'Quarter' then 'usage_quarter'\n",
+        "        when :param_time_key_c428ed54 = 'Month' then 'usage_month'\n",
+        "        when :param_time_key_c428ed54 = 'Week' then 'usage_week'\n",
         "        else 'usage_date'\n",
         "      end\n",
         "    ) as time_key,\n",
@@ -2363,7 +2363,7 @@
         "    rank_key\n",
         "  order by\n",
         "    usage_usd desc\n",
-        "  limit :param_top_n_2560eaca\n",
+        "  limit :param_top_n_c428ed54\n",
         "),\n",
         "list_priced_usd_with_rank_key_normalized as (\n",
         "  select\n",
@@ -2380,7 +2380,7 @@
         "      left join top_ranked_usage\n",
         "        on u.rank_key = top_ranked_usage.rank_key\n",
         "  where\n",
-        "    :param_show_null_rank_key_2560eaca = 'Yes'\n",
+        "    :param_show_null_rank_key_c428ed54 = 'Yes'\n",
         "    or u.rank_key is not null\n",
         "),\n",
         "-- calc usage by period\n",
@@ -2421,34 +2421,34 @@
         "period_info as (\n",
         "  select\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date()\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date())\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date())\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date()\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date())\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date())\n",
         "    end as current_period,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 1 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 7 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 1 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 1 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 7 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 1 month)\n",
         "    end as last_period,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 2 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 14 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 2 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 2 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 14 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 2 month)\n",
         "    end as 2_periods_ago,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 3 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 21 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 3 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 3 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 21 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 3 month)\n",
         "    end as 3_periods_ago,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 4 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 28 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 4 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 4 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 28 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 4 month)\n",
         "    end as 4_periods_ago,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 5 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 35 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 5 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 5 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 35 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 5 month)\n",
         "    end as 5_periods_ago\n",
         "),\n",
         "-- pivot change\n",
@@ -2596,9 +2596,9 @@
         "      '' as group_key,\n",
         "      concat(\n",
         "        '<b><i>',\n",
-        "        date_format(:param_start_date_2560eaca, 'MMM dd yyyy'),\n",
+        "        date_format(:param_start_date_c428ed54, 'MMM dd yyyy'),\n",
         "        ' - ',\n",
-        "        date_format(:param_end_date_2560eaca, 'MMM dd yyyy'),\n",
+        "        date_format(:param_end_date_c428ed54, 'MMM dd yyyy'),\n",
         "        '</i></b>'\n",
         "      ) as `Start to End date`,\n",
         "      null as _all_time_usage_usd,\n",
@@ -2747,7 +2747,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -2762,7 +2762,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -2777,7 +2777,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2792,7 +2792,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_top_n",
-          "keyword": "param_top_n_2560eaca",
+          "keyword": "param_top_n_c428ed54",
           "dataType": "INTEGER",
           "defaultSelection": {
             "values": {
@@ -2807,7 +2807,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_time_key",
-          "keyword": "param_time_key_2560eaca",
+          "keyword": "param_time_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2822,7 +2822,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_show_null_rank_key",
-          "keyword": "param_show_null_rank_key_2560eaca",
+          "keyword": "param_show_null_rank_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2837,7 +2837,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -2853,7 +2853,7 @@
       ]
     },
     {
-      "name": "fd8cd918",
+      "name": "169671f6",
       "displayName": "[Overview] Highest Change in usage Over Period",
       "queryLines": [
         "with most_recent_jobs as (\n",
@@ -2894,7 +2894,7 @@
         "  from\n",
         "    system.billing.usage as u LEFT JOIN system.access.workspaces_latest USING (workspace_id)\n",
         "  where\n",
-        "    u.usage_date between :param_start_date_2560eaca and :param_end_date_2560eaca\n",
+        "    u.usage_date between :param_start_date_c428ed54 and :param_end_date_c428ed54\n",
         "    AND (\n",
         "      billing_origin_product IN (\"JOBS\", \"DLT\", \"LAKEFLOW_CONNECT\")\n",
         "      OR (\n",
@@ -2903,15 +2903,15 @@
         "      )\n",
         "    )\n",
         "    AND IF(\n",
-        "      :param_cluster_type_2560eaca = '<ALL CLUSTER TYPES>',\n",
+        "      :param_cluster_type_c428ed54 = '<ALL CLUSTER TYPES>',\n",
         "      true,\n",
         "      IF(\n",
-        "        :param_cluster_type_2560eaca = 'Serverless',\n",
+        "        :param_cluster_type_c428ed54 = 'Serverless',\n",
         "        product_features.is_serverless = TRUE,\n",
         "        product_features.is_serverless = FALSE\n",
         "      )\n",
         "    )\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_2560eaca) -- all workspaces under account, or single workspace\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_name = :param_workspace_c428ed54) -- all workspaces under account, or single workspace\n",
         "),\n",
         "-- calc list priced usage in USD\n",
         "prices as (\n",
@@ -2961,9 +2961,9 @@
         "  select\n",
         "    identifier(\n",
         "      case\n",
-        "        when :param_time_key_2560eaca = 'Quarter' then 'usage_quarter'\n",
-        "        when :param_time_key_2560eaca = 'Month' then 'usage_month'\n",
-        "        when :param_time_key_2560eaca = 'Week' then 'usage_week'\n",
+        "        when :param_time_key_c428ed54 = 'Quarter' then 'usage_quarter'\n",
+        "        when :param_time_key_c428ed54 = 'Month' then 'usage_month'\n",
+        "        when :param_time_key_c428ed54 = 'Week' then 'usage_week'\n",
         "        else 'usage_date'\n",
         "      end\n",
         "    ) as time_key,\n",
@@ -3015,19 +3015,19 @@
         "period_info as (\n",
         "  select\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date()\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date())\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date())\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date()\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date())\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date())\n",
         "    end as current_period,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 1 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 7 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 1 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 1 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 7 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 1 month)\n",
         "    end as last_period,\n",
         "    case\n",
-        "      when :param_time_key_2560eaca = 'Day' then current_date() - interval 2 day\n",
-        "      when :param_time_key_2560eaca = 'Week' then date_trunc('WEEK', current_date() - interval 14 day)\n",
-        "      when :param_time_key_2560eaca = 'Month' then date_trunc('MONTH', current_date() - interval 2 month)\n",
+        "      when :param_time_key_c428ed54 = 'Day' then current_date() - interval 2 day\n",
+        "      when :param_time_key_c428ed54 = 'Week' then date_trunc('WEEK', current_date() - interval 14 day)\n",
+        "      when :param_time_key_c428ed54 = 'Month' then date_trunc('MONTH', current_date() - interval 2 month)\n",
         "    end as 2_periods_ago\n",
         "),\n",
         "-- pivot change\n",
@@ -3061,7 +3061,7 @@
         "    x_period_back = 'Last period'\n",
         "  ORDER BY\n",
         "    usage_change DESC\n",
-        "  LIMIT :param_top_n_2560eaca\n",
+        "  LIMIT :param_top_n_c428ed54\n",
         "),\n",
         "top_usage_changes as (\n",
         "  SELECT\n",
@@ -3262,7 +3262,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3277,7 +3277,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3292,7 +3292,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_time_key",
-          "keyword": "param_time_key_2560eaca",
+          "keyword": "param_time_key_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3307,7 +3307,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_top_n",
-          "keyword": "param_top_n_2560eaca",
+          "keyword": "param_top_n_c428ed54",
           "dataType": "INTEGER",
           "defaultSelection": {
             "values": {
@@ -3322,7 +3322,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_type",
-          "keyword": "param_cluster_type_2560eaca",
+          "keyword": "param_cluster_type_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3337,7 +3337,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3353,7 +3353,7 @@
       ]
     },
     {
-      "name": "62cceafe",
+      "name": "1925d3af",
       "displayName": "[Operational Observability] Highest Failure Jobs",
       "queryLines": [
         "with usage_with_cost as (\n",
@@ -3372,8 +3372,8 @@
         "          or list_prices.price_end_time is null\n",
         "        )\n",
         "  WHERE\n",
-        "    (t1.usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    (t1.usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "),\n",
         "most_recent_jobs as (\n",
         "  SELECT\n",
@@ -3382,7 +3382,7 @@
         "  FROM\n",
         "    system.lakeflow.jobs\n",
         "  WHERE\n",
-        "    if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "  QUALIFY\n",
         "    rn = 1\n",
         "),\n",
@@ -3449,7 +3449,7 @@
         "    system.lakeflow.job_run_timeline\n",
         "  WHERE\n",
         "    result_state IS NOT NULL\n",
-        "    AND period_end_time >= :param_start_date_2560eaca\n",
+        "    AND period_end_time >= :param_start_date_c428ed54\n",
         "),\n",
         "output AS (\n",
         "  SELECT\n",
@@ -3469,9 +3469,9 @@
         "  GROUP BY\n",
         "    ALL\n",
         "  HAVING\n",
-        "    (failure_list_cost > :param_min_usage_2560eaca)\n",
+        "    (failure_list_cost > :param_min_usage_c428ed54)\n",
         "    OR (\n",
-        "      :param_include_all_2560eaca = 'Yes'\n",
+        "      :param_include_all_c428ed54 = 'Yes'\n",
         "      AND failure_list_cost IS NULL\n",
         "    )\n",
         "  ORDER BY\n",
@@ -3502,7 +3502,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3517,7 +3517,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3532,7 +3532,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3547,7 +3547,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_min_usage",
-          "keyword": "param_min_usage_2560eaca",
+          "keyword": "param_min_usage_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3562,7 +3562,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_include_all",
-          "keyword": "param_include_all_2560eaca",
+          "keyword": "param_include_all_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3578,7 +3578,7 @@
       ]
     },
     {
-      "name": "4071704e",
+      "name": "57770a59",
       "displayName": "[Operational Observability] Most Retried Runs",
       "queryLines": [
         "with usage_with_cost as (\n",
@@ -3597,7 +3597,7 @@
         "          or list_prices.price_end_time is null\n",
         "        )\n",
         "  WHERE\n",
-        "    (t1.usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
+        "    (t1.usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
         "),\n",
         "most_recent_jobs as (\n",
         "  SELECT\n",
@@ -3729,9 +3729,9 @@
         "    t1.run_id,\n",
         "    t1.period_end_time\n",
         "  HAVING\n",
-        "    (repair_list_cost > :param_min_usage_2560eaca)\n",
+        "    (repair_list_cost > :param_min_usage_c428ed54)\n",
         "    OR (\n",
-        "      :param_include_all_2560eaca = 'Yes'\n",
+        "      :param_include_all_c428ed54 = 'Yes'\n",
         "      AND repair_list_cost IS NULL\n",
         "    )\n",
         "  ORDER BY\n",
@@ -3758,7 +3758,7 @@
         "FROM\n",
         "  output t1 LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "WHERE\n",
-        "  if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "  if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "ORDER BY\n",
         "  repair_list_cost,\n",
         "  repairs DESC"
@@ -3766,7 +3766,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3781,7 +3781,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3796,7 +3796,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_min_usage",
-          "keyword": "param_min_usage_2560eaca",
+          "keyword": "param_min_usage_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3811,7 +3811,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_include_all",
-          "keyword": "param_include_all_2560eaca",
+          "keyword": "param_include_all_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3826,7 +3826,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3842,7 +3842,7 @@
       ]
     },
     {
-      "name": "0e23e56c",
+      "name": "149c3567",
       "displayName": "[Operational Observability] Job Outliers",
       "queryLines": [
         "-- SPENDING BROKEN DOWN BY JOB\n",
@@ -3878,7 +3878,7 @@
         "  WHERE\n",
         "    t1.usage_metadata.job_id IS NOT NULL\n",
         "    AND t1.usage_metadata.job_run_id IS NOT NULL\n",
-        "    AND (t1.usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
+        "    AND (t1.usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
         "  GROUP BY\n",
         "    1,\n",
         "    2,\n",
@@ -3898,7 +3898,7 @@
         "  FROM\n",
         "    stats_per_job_run t1 LEFT JOIN most_recent_jobs t2 USING (workspace_id, job_id)\n",
         "  WHERE\n",
-        "    first_seen > :param_start_date_2560eaca\n",
+        "    first_seen > :param_start_date_c428ed54\n",
         "  GROUP BY\n",
         "    ALL\n",
         "  ORDER BY\n",
@@ -3933,12 +3933,12 @@
         "FROM\n",
         "  output t1 LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "WHERE\n",
-        "  if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)"
+        "  if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)"
       ],
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3953,7 +3953,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -3968,7 +3968,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -3984,7 +3984,7 @@
       ]
     },
     {
-      "name": "1695d7c3",
+      "name": "af46bae1",
       "displayName": "[Operational Observability] Failure usage by day",
       "queryLines": [
         "with usage_with_cost as (\n",
@@ -4003,7 +4003,7 @@
         "          or list_prices.price_end_time is null\n",
         "        )\n",
         "  WHERE\n",
-        "    (t1.usage_date BETWEEN :param_start_date_2560eaca AND :param_end_date_2560eaca)\n",
+        "    (t1.usage_date BETWEEN :param_start_date_c428ed54 AND :param_end_date_c428ed54)\n",
         "),\n",
         "job_run_timeline_with_cost as (\n",
         "  SELECT\n",
@@ -4064,13 +4064,13 @@
         "FROM\n",
         "  costs_by_status t1 LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "WHERE\n",
-        "  if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "  if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "  and result_state IN ('ERROR', 'FAILED', 'TIMED_OUT');"
       ],
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_start_date",
-          "keyword": "param_start_date_2560eaca",
+          "keyword": "param_start_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -4085,7 +4085,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_end_date",
-          "keyword": "param_end_date_2560eaca",
+          "keyword": "param_end_date_c428ed54",
           "dataType": "DATE",
           "defaultSelection": {
             "values": {
@@ -4100,7 +4100,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4116,7 +4116,7 @@
       ]
     },
     {
-      "name": "1291f11b",
+      "name": "6be7fd38",
       "displayName": "[Health Recommendations] Stale datasets",
       "queryLines": [
         "with producers as (\n",
@@ -4231,7 +4231,7 @@
         "      LEFT JOIN agg_cost t4 USING (workspace_id, job_id)\n",
         "      LEFT JOIN most_recent_jobs t5 USING (workspace_id, job_id)\n",
         "  WHERE\n",
-        "    if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "  GROUP BY\n",
         "    ALL\n",
         "  HAVING\n",
@@ -4263,7 +4263,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4279,7 +4279,7 @@
       ]
     },
     {
-      "name": "b8ab7e61",
+      "name": "8ba8ccf1",
       "displayName": "[Health Recommendations] Jobs using Old DBR",
       "queryLines": [
         "with list_cost_per_job_cluster as (\n",
@@ -4307,7 +4307,7 @@
         "    and t1.product_features.is_serverless IS FALSE\n",
         "    AND t1.usage_metadata.job_id IS NOT NULL\n",
         "    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "  GROUP BY\n",
         "    ALL\n",
         "),\n",
@@ -4390,7 +4390,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4406,7 +4406,7 @@
       ]
     },
     {
-      "name": "a9cc5262",
+      "name": "bfe346b7",
       "displayName": "[Health Recommendations] Jobs no Tags",
       "queryLines": [
         "with most_recent_jobs as (\n",
@@ -4425,7 +4425,7 @@
         "    system.lakeflow.job_run_timeline\n",
         "  where\n",
         "    period_end_time > CURRENT_DATE - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "),\n",
         "output as (\n",
         "  select\n",
@@ -4466,7 +4466,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4482,7 +4482,7 @@
       ]
     },
     {
-      "name": "a11def34",
+      "name": "8fa0b74c",
       "displayName": "[Health Recommendations] Jobs without Autoscaling",
       "queryLines": [
         "with list_cost_per_job_cluster as (\n",
@@ -4510,7 +4510,7 @@
         "    AND t1.usage_metadata.job_id IS NOT NULL\n",
         "    AND t1.usage_metadata.cluster_id IS NOT NULL\n",
         "    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, workspace_id = :param_workspace_c428ed54)\n",
         "  GROUP BY\n",
         "    ALL\n",
         "),\n",
@@ -4600,7 +4600,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4616,7 +4616,7 @@
       ]
     },
     {
-      "name": "22bb1070",
+      "name": "1c3566ad",
       "displayName": "[Cluster Analysis] Highest potential job savings",
       "queryLines": [
         "with list_cost_per_job_cluster as (\n",
@@ -4641,7 +4641,7 @@
         "        )\n",
         "      LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  WHERE\n",
-        "    if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "    if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "    and t1.product_features.is_serverless is FALSE\n",
         "    AND t1.usage_metadata.job_id IS NOT NULL\n",
         "    AND t1.usage_date >= CURRENT_DATE() - INTERVAL 30 DAY\n",
@@ -4784,7 +4784,7 @@
         "from\n",
         "  finalutil\n",
         "WHERE\n",
-        "  `Workers Avg CPU Utilization` <= :param_cluster_utilization_2560eaca\n",
+        "  `Workers Avg CPU Utilization` <= :param_cluster_utilization_c428ed54\n",
         "order by\n",
         "  maxsavings desc\n",
         "limit 25"
@@ -4792,7 +4792,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4807,7 +4807,7 @@
         },
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_cluster_utilization",
-          "keyword": "param_cluster_utilization_2560eaca",
+          "keyword": "param_cluster_utilization_c428ed54",
           "dataType": "DECIMAL",
           "defaultSelection": {
             "values": {
@@ -4823,7 +4823,7 @@
       ]
     },
     {
-      "name": "ad24897a",
+      "name": "5e6a4710",
       "displayName": "[Cluster Analysis] Jobs running on AP clusters",
       "queryLines": [
         "with clusters AS (\n",
@@ -4847,7 +4847,7 @@
         "      LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  WHERE\n",
         "    period_start_time >= CURRENT_DATE() - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "),\n",
         "all_purpose_cluster_jobs AS (\n",
         "  SELECT\n",
@@ -4887,7 +4887,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -4903,7 +4903,7 @@
       ]
     },
     {
-      "name": "165890f4",
+      "name": "fbd803d5",
       "displayName": "[Cluster Analysis] AP clusters by jobs executed",
       "queryLines": [
         "with clusters AS (\n",
@@ -4927,7 +4927,7 @@
         "      LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  WHERE\n",
         "    period_start_time >= CURRENT_DATE() - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "),\n",
         "all_purpose_cluster_jobs AS (\n",
         "  SELECT\n",
@@ -4995,7 +4995,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -5011,7 +5011,7 @@
       ]
     },
     {
-      "name": "0e8f08f0",
+      "name": "01e1f717",
       "displayName": "[Cluster Analysis] MoM overview",
       "queryLines": [
         "WITH aggregated_data AS (\n",
@@ -5032,7 +5032,7 @@
         "    system.compute.node_timeline t1\n",
         "      LEFT JOIN system.access.workspaces_latest t2 USING (workspace_id)\n",
         "  WHERE\n",
-        "    if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "    if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "    AND start_time >= current_date - INTERVAL '60 days'\n",
         "    AND end_time IS NOT NULL\n",
         "),\n",
@@ -5125,7 +5125,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -5141,14 +5141,14 @@
       ]
     },
     {
-      "name": "07fe2125",
+      "name": "925c9bf4",
       "displayName": "[SELECT] Workspace Names",
       "queryLines": [
         "SELECT DISTINCT workspace_name FROM system.access.workspaces_latest ORDER BY lower(workspace_name) ASC;"
       ]
     },
     {
-      "name": "a5673866",
+      "name": "06fc01e6",
       "displayName": "[SELECT] Cluster CPU Thresholds",
       "queryLines": [
         "select\n",
@@ -5156,7 +5156,7 @@
       ]
     },
     {
-      "name": "a1d3c361",
+      "name": "2cde6c68",
       "displayName": "[Cluster Analysis] Cluster consumption over time",
       "queryLines": [
         "with cluster_utilisation AS (\n",
@@ -5174,7 +5174,7 @@
         "      JOIN system.access.workspaces_latest t2\n",
         "  WHERE\n",
         "    start_time >= CURRENT_DATE() - INTERVAL 30 DAY\n",
-        "    AND if(:param_workspace_2560eaca = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_2560eaca)\n",
+        "    AND if(:param_workspace_c428ed54 = '<ALL WORKSPACES>', true, t2.workspace_name = :param_workspace_c428ed54)\n",
         "  GROUP BY ALL\n",
         "    \n",
         ")\n",
@@ -5183,7 +5183,7 @@
       "parameters": [
         {
           "displayName": "Tabelas de Sistema LakeFlow v0.1: param_workspace",
-          "keyword": "param_workspace_2560eaca",
+          "keyword": "param_workspace_c428ed54",
           "dataType": "STRING",
           "defaultSelection": {
             "values": {
@@ -5201,7 +5201,7 @@
   ],
   "pages": [
     {
-      "name": "fb40b154",
+      "name": "47755331",
       "displayName": "Tabelas de Sistema de Jobs: Nova P\u00e1gina",
       "layout": [
         {
@@ -5211,7 +5211,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "c980521d",
+                  "datasetName": "b2a8f9c5",
                   "fields": [
                     {
                       "name": "job_id",
@@ -5505,7 +5505,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "0ff3e918",
+                  "datasetName": "037b8fcc",
                   "fields": [
                     {
                       "name": "sum(Last30to60DaySpend)",
@@ -5546,7 +5546,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "9080da05",
+                  "datasetName": "1c1a6645",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -5889,7 +5889,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1115189aa1b763efc94c0c34_period_end_time",
                 "query": {
-                  "datasetName": "7801704c",
+                  "datasetName": "51dfb5a7",
                   "fields": [
                     {
                       "name": "period_end_time",
@@ -5906,7 +5906,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112a1a5bbfc5a713abaf44c8_usage_end_time",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "usage_end_time",
@@ -5923,7 +5923,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d11251513a8c486a1267b2242_usage_end_time",
                 "query": {
-                  "datasetName": "9e75b6fd",
+                  "datasetName": "5626d400",
                   "fields": [
                     {
                       "name": "usage_end_time",
@@ -5980,7 +5980,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "b4c689de",
+                  "datasetName": "969e48a3",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -6240,7 +6240,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "9e75b6fd",
+                  "datasetName": "5626d400",
                   "fields": [
                     {
                       "name": "daily(usage_end_time)",
@@ -6335,7 +6335,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "sku_name",
@@ -6405,7 +6405,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee160766215f0a7ef0292360d6895_job_id",
                 "query": {
-                  "datasetName": "9080da05",
+                  "datasetName": "1c1a6645",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6422,7 +6422,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee1607664184e811fbf8ae29c6f9b_job_id",
                 "query": {
-                  "datasetName": "7801704c",
+                  "datasetName": "51dfb5a7",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6439,7 +6439,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee160766618a3988d3d1574121eb9_job_id",
                 "query": {
-                  "datasetName": "b4c689de",
+                  "datasetName": "969e48a3",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6456,7 +6456,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee16076681a21be8d1a87b12f7a7e_job_id",
                 "query": {
-                  "datasetName": "9e75b6fd",
+                  "datasetName": "5626d400",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6473,7 +6473,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee160766a1a36821c722538cd0b97_job_id",
                 "query": {
-                  "datasetName": "44c189cb",
+                  "datasetName": "f380fc44",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6490,7 +6490,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee160766c1a238c191c3fcd462999_job_id",
                 "query": {
-                  "datasetName": "c980521d",
+                  "datasetName": "b2a8f9c5",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6507,7 +6507,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee160767514eaaa492671b6de5b24_job_id",
                 "query": {
-                  "datasetName": "1ed3a5b7",
+                  "datasetName": "ef4e08df",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6524,7 +6524,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee1607677147a8912a7296ca363d6_job_id",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6541,7 +6541,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eee6b68a0d1199bfe2a4a773bce474_job_id",
                 "query": {
-                  "datasetName": "11db8b54",
+                  "datasetName": "0956d9ea",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6558,7 +6558,7 @@
               {
                 "name": "dashboards/01eee160765f1a2aafa39a09af295526/datasets/01eef8fde24c1d6aaed907d5e57845fa_job_id",
                 "query": {
-                  "datasetName": "f463e18e",
+                  "datasetName": "bd7704c6",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6651,7 +6651,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "44c189cb",
+                  "datasetName": "f380fc44",
                   "fields": [
                     {
                       "name": "job_id",
@@ -6911,7 +6911,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -6979,7 +6979,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1115189aa1b763efc94c0c34_workspace_id",
                 "query": {
-                  "datasetName": "7801704c",
+                  "datasetName": "51dfb5a7",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -6996,7 +6996,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1128131fb9e01cac845917fd_workspace_id",
                 "query": {
-                  "datasetName": "2d7e1f43",
+                  "datasetName": "44af17d2",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7013,7 +7013,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112c1eec8f52d7f62b5747c9_workspace_id",
                 "query": {
-                  "datasetName": "b4c689de",
+                  "datasetName": "969e48a3",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7030,7 +7030,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1122109b80eafe6a8ef44c4b_workspace_id",
                 "query": {
-                  "datasetName": "1ed3a5b7",
+                  "datasetName": "ef4e08df",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7047,7 +7047,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1135149380718c60d46a1635_workspace_id",
                 "query": {
-                  "datasetName": "44c189cb",
+                  "datasetName": "f380fc44",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7064,7 +7064,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d11251513a8c486a1267b2242_workspace_id",
                 "query": {
-                  "datasetName": "9e75b6fd",
+                  "datasetName": "5626d400",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7081,7 +7081,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1138158697aa8f1c17fd4792_workspace_id",
                 "query": {
-                  "datasetName": "9080da05",
+                  "datasetName": "1c1a6645",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7098,7 +7098,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d11181b3285cbe1695cbcaf4b_workspace_id",
                 "query": {
-                  "datasetName": "c980521d",
+                  "datasetName": "b2a8f9c5",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7115,7 +7115,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112f17c7886968566cca9912_workspace_id",
                 "query": {
-                  "datasetName": "f463e18e",
+                  "datasetName": "bd7704c6",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7132,7 +7132,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d111e1120a7fdf215a6d76f6c_workspace_id",
                 "query": {
-                  "datasetName": "11db8b54",
+                  "datasetName": "0956d9ea",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7149,7 +7149,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112a1a5bbfc5a713abaf44c8_workspace_id",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -7258,7 +7258,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "0ff3e918",
+                  "datasetName": "037b8fcc",
                   "fields": [
                     {
                       "name": "sum(Last30DaySpend)",
@@ -7300,7 +7300,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "0ff3e918",
+                  "datasetName": "037b8fcc",
                   "fields": [
                     {
                       "name": "Last30DayGrowth",
@@ -7341,7 +7341,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "709a2764",
+                  "datasetName": "9417fc0c",
                   "fields": [
                     {
                       "name": "3_months_growth_moving_avg",
@@ -7413,7 +7413,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1138158697aa8f1c17fd4792_run_as",
                 "query": {
-                  "datasetName": "9080da05",
+                  "datasetName": "1c1a6645",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7430,7 +7430,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112c1eec8f52d7f62b5747c9_run_as",
                 "query": {
-                  "datasetName": "b4c689de",
+                  "datasetName": "969e48a3",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7447,7 +7447,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d11181b3285cbe1695cbcaf4b_run_as",
                 "query": {
-                  "datasetName": "c980521d",
+                  "datasetName": "b2a8f9c5",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7464,7 +7464,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1135149380718c60d46a1635_run_as",
                 "query": {
-                  "datasetName": "44c189cb",
+                  "datasetName": "f380fc44",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7481,7 +7481,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d1122109b80eafe6a8ef44c4b_run_as",
                 "query": {
-                  "datasetName": "1ed3a5b7",
+                  "datasetName": "ef4e08df",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7498,7 +7498,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d111e1120a7fdf215a6d76f6c_run_as",
                 "query": {
-                  "datasetName": "11db8b54",
+                  "datasetName": "0956d9ea",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7515,7 +7515,7 @@
               {
                 "name": "dashboards/01ef070d110715f2b6d3061b8bda89ea/datasets/01ef070d112a1a5bbfc5a713abaf44c8_run_as",
                 "query": {
-                  "datasetName": "04affe8d",
+                  "datasetName": "b27980ab",
                   "fields": [
                     {
                       "name": "run_as",
@@ -7604,7 +7604,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "f463e18e",
+                  "datasetName": "bd7704c6",
                   "fields": [
                     {
                       "name": "avg_list_cost",
@@ -7901,7 +7901,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "7801704c",
+                  "datasetName": "51dfb5a7",
                   "fields": [
                     {
                       "name": "countdistinct(run_id)",
@@ -7996,7 +7996,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "11db8b54",
+                  "datasetName": "0956d9ea",
                   "fields": [
                     {
                       "name": "job_id",
@@ -8320,7 +8320,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "1ed3a5b7",
+                  "datasetName": "ef4e08df",
                   "fields": [
                     {
                       "name": "Last14DaySpend",
@@ -8655,7 +8655,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "2d7e1f43",
+                  "datasetName": "44af17d2",
                   "fields": [
                     {
                       "name": "num_jobs",
@@ -8818,7 +8818,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "a6199734",
+                  "datasetName": "2a069619",
                   "fields": [
                     {
                       "name": "name",
@@ -8892,7 +8892,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "387e1015",
+                  "datasetName": "00311ac6",
                   "fields": [
                     {
                       "name": "name",
@@ -8965,7 +8965,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "bb2993fe",
+                  "datasetName": "ada3a42b",
                   "fields": [
                     {
                       "name": "sum(list_cost)",
@@ -9024,7 +9024,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "b4382d02",
+                  "datasetName": "c5747db7",
                   "fields": [
                     {
                       "name": "name",
@@ -9100,7 +9100,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "d2f17553",
+                  "datasetName": "bec439a1",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -9394,7 +9394,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "b95eb997",
+                  "datasetName": "fd7461f8",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -9635,7 +9635,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ed6a4a62",
+                  "datasetName": "a3629936",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -9821,7 +9821,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "bd7c848b",
+                  "datasetName": "07667893",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -10019,7 +10019,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "5b55fedd",
+                  "datasetName": "bac62f64",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -10273,7 +10273,7 @@
       "pageType": "PAGE_TYPE_CANVAS"
     },
     {
-      "name": "1b02d0f3",
+      "name": "4bf106ca",
       "displayName": "Tabelas de Sistema LakeFlow v0.1: Vis\u00e3o Geral",
       "layout": [
         {
@@ -10283,7 +10283,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "fields": [
                     {
                       "name": "workspace",
@@ -10739,7 +10739,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "fields": [
                     {
                       "name": "workspace",
@@ -11540,7 +11540,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "fields": [
                     {
                       "name": "result_state",
@@ -11639,7 +11639,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "fields": [
                     {
                       "name": "workspace",
@@ -12126,7 +12126,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "fields": [
                     {
                       "name": "termination_code",
@@ -12227,7 +12227,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb54881120cb47ceb5dd41a7344_param_start_date",
                 "query": {
-                  "datasetName": "290826a0",
+                  "datasetName": "a777bb8d",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12240,7 +12240,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacba488b1dcfaec54f03c6545c62_param_start_date",
                 "query": {
-                  "datasetName": "21f5a214",
+                  "datasetName": "907184c7",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12253,7 +12253,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_start_date",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12266,7 +12266,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_start_date",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12279,7 +12279,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdac1171fc39599215f42dc4c17_param_start_date",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12292,7 +12292,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface1546f1957b208a0111252518e_param_start_date",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12305,7 +12305,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface26b1c1a25a38e27ebfda9dcc8_param_start_date",
                 "query": {
-                  "datasetName": "34d44de4",
+                  "datasetName": "82adb186",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12318,7 +12318,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efad92f47418aa827eeb73a0090aa6_param_start_date",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12331,7 +12331,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadafc390108e94922cd7f320ce4e_param_start_date",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -12417,7 +12417,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb54881120cb47ceb5dd41a7344_param_end_date",
                 "query": {
-                  "datasetName": "290826a0",
+                  "datasetName": "a777bb8d",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12430,7 +12430,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacba488b1dcfaec54f03c6545c62_param_end_date",
                 "query": {
-                  "datasetName": "21f5a214",
+                  "datasetName": "907184c7",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12443,7 +12443,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_end_date",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12456,7 +12456,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_end_date",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12469,7 +12469,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdac1171fc39599215f42dc4c17_param_end_date",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12482,7 +12482,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface1546f1957b208a0111252518e_param_end_date",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12495,7 +12495,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface26b1c1a25a38e27ebfda9dcc8_param_end_date",
                 "query": {
-                  "datasetName": "34d44de4",
+                  "datasetName": "82adb186",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12508,7 +12508,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efad92f47418aa827eeb73a0090aa6_param_end_date",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12521,7 +12521,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadafc390108e94922cd7f320ce4e_param_end_date",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -12607,7 +12607,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f0673fb52a1570882e205c386e46ec_workspace_name",
                 "query": {
-                  "datasetName": "049a14ff",
+                  "datasetName": "925c9bf4",
                   "fields": [
                     {
                       "name": "workspace_name",
@@ -12624,7 +12624,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1d0eac27bd9674ac21b0_param_workspace",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12637,7 +12637,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1d27854877310a926888_param_workspace",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12650,7 +12650,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1d63b934216610b4c0fb_param_workspace",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12663,7 +12663,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1d82812bb7650ef937e3_param_workspace",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12676,7 +12676,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1d948d8498ec4e2ebcf5_param_workspace",
                 "query": {
-                  "datasetName": "34d44de4",
+                  "datasetName": "82adb186",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12689,7 +12689,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1dec946b92515c8f655a_param_workspace",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12702,7 +12702,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e069314ff0a538aaabc_param_workspace",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12785,7 +12785,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacba488b1dcfaec54f03c6545c62_run_as",
                 "query": {
-                  "datasetName": "21f5a214",
+                  "datasetName": "907184c7",
                   "fields": [
                     {
                       "name": "run_as",
@@ -12802,7 +12802,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbc67a51ca88bbd79d6ebc3243a_param_workspace",
                 "query": {
-                  "datasetName": "0634edf8",
+                  "datasetName": "b65038eb",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -12815,7 +12815,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_run_as",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_run_as",
@@ -12828,7 +12828,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_run_as",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_run_as",
@@ -12895,7 +12895,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbb4a871703b4821e4b2015fdcc_cluster_type",
                 "query": {
-                  "datasetName": "dfff583f",
+                  "datasetName": "60b8c1cc",
                   "fields": [
                     {
                       "name": "cluster_type",
@@ -12912,7 +12912,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdac1171fc39599215f42dc4c17_param_cluster_type",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -12972,7 +12972,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb531d7116eace5fc549a40b392_time_key",
                 "query": {
-                  "datasetName": "069df21d",
+                  "datasetName": "97aec557",
                   "fields": [
                     {
                       "name": "time_key",
@@ -12989,7 +12989,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdac1171fc39599215f42dc4c17_param_time_key",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_time_key",
@@ -13002,7 +13002,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface1546f1957b208a0111252518e_param_time_key",
                 "query": {
-                  "datasetName": "f5da4429",
+                  "datasetName": "0999e6d6",
                   "parameters": [
                     {
                       "name": "param_time_key",
@@ -13015,7 +13015,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01eface26b1c1a25a38e27ebfda9dcc8_param_time_key",
                 "query": {
-                  "datasetName": "34d44de4",
+                  "datasetName": "82adb186",
                   "parameters": [
                     {
                       "name": "param_time_key",
@@ -13083,7 +13083,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efad92f47418aa827eeb73a0090aa6_param_top_n",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_top_n",
@@ -13096,7 +13096,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadafc390108e94922cd7f320ce4e_param_top_n",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_top_n",
@@ -13158,7 +13158,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_tag_entries",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_tag_entries",
@@ -13214,7 +13214,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efaccca90514808393ee5c4c9ba892_object_type",
                 "query": {
-                  "datasetName": "67e2fe82",
+                  "datasetName": "7f7b04d1",
                   "fields": [
                     {
                       "name": "object_type",
@@ -13231,7 +13231,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_object_type",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_object_type",
@@ -13244,7 +13244,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_object_type",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_object_type",
@@ -13308,7 +13308,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacd1cd311c92b5dec39d036f0423_tag_key",
                 "query": {
-                  "datasetName": "7a6f77fd",
+                  "datasetName": "17d00951",
                   "fields": [
                     {
                       "name": "tag_key",
@@ -13367,7 +13367,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdef557127e927c4b51a6438712_group_key",
                 "query": {
-                  "datasetName": "c08772e3",
+                  "datasetName": "4e768f5c",
                   "fields": [
                     {
                       "name": "group_key",
@@ -13384,7 +13384,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacdac1171fc39599215f42dc4c17_param_group_key",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "parameters": [
                     {
                       "name": "param_group_key",
@@ -13477,7 +13477,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ea9194cb",
+                  "datasetName": "7435743e",
                   "fields": [
                     {
                       "name": "title_job_runs_overview",
@@ -13517,7 +13517,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ea9194cb",
+                  "datasetName": "7435743e",
                   "fields": [
                     {
                       "name": "title_trends",
@@ -13556,7 +13556,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "fields": [
                     {
                       "name": "workspace",
@@ -14160,7 +14160,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb531d7116eace5fc549a40b392_time_key",
                 "query": {
-                  "datasetName": "069df21d",
+                  "datasetName": "97aec557",
                   "fields": [
                     {
                       "name": "time_key",
@@ -14177,7 +14177,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efad92f47418aa827eeb73a0090aa6_param_time_key",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_time_key",
@@ -14190,7 +14190,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadafc390108e94922cd7f320ce4e_param_time_key",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_time_key",
@@ -14254,7 +14254,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_top_n",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_top_n",
@@ -14267,7 +14267,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_top_n",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_top_n",
@@ -14329,7 +14329,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ea9194cb",
+                  "datasetName": "7435743e",
                   "fields": [
                     {
                       "name": "title_interactive_search",
@@ -14393,7 +14393,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "17bdde51",
+                  "datasetName": "e13b55f5",
                   "fields": [
                     {
                       "name": "group_key",
@@ -14460,7 +14460,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbb4a871703b4821e4b2015fdcc_cluster_type",
                 "query": {
-                  "datasetName": "dfff583f",
+                  "datasetName": "60b8c1cc",
                   "fields": [
                     {
                       "name": "cluster_type",
@@ -14477,7 +14477,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efad92f47418aa827eeb73a0090aa6_param_cluster_type",
                 "query": {
-                  "datasetName": "d7ec54ed",
+                  "datasetName": "ef74594b",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -14490,7 +14490,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadafc390108e94922cd7f320ce4e_param_cluster_type",
                 "query": {
-                  "datasetName": "a5cd5fb8",
+                  "datasetName": "169671f6",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -14554,7 +14554,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbb4a871703b4821e4b2015fdcc_cluster_type",
                 "query": {
-                  "datasetName": "dfff583f",
+                  "datasetName": "60b8c1cc",
                   "fields": [
                     {
                       "name": "cluster_type",
@@ -14571,7 +14571,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbddc661d83b9077062f1660323_param_cluster_type",
                 "query": {
-                  "datasetName": "95e8c27f",
+                  "datasetName": "701c8651",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -14584,7 +14584,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacc098471ec6aa5bc0cc70b32298_param_cluster_type",
                 "query": {
-                  "datasetName": "43405052",
+                  "datasetName": "7c56b45b",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -14645,7 +14645,7 @@
       "pageType": "PAGE_TYPE_CANVAS"
     },
     {
-      "name": "ba2f46b4",
+      "name": "ba7983ce",
       "displayName": "Tabelas de Sistema LakeFlow v0.1: An\u00e1lise de Clusters",
       "layout": [
         {
@@ -14655,7 +14655,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "387f6d69",
+                  "datasetName": "5e6a4710",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -14851,7 +14851,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "19d27545",
+                  "datasetName": "fbd803d5",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -15110,7 +15110,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "7ca4ee39",
+                  "datasetName": "1c3566ad",
                   "fields": [
                     {
                       "name": "name",
@@ -15610,7 +15610,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f0673fb52a1570882e205c386e46ec_workspace_name",
                 "query": {
-                  "datasetName": "049a14ff",
+                  "datasetName": "925c9bf4",
                   "fields": [
                     {
                       "name": "workspace_name",
@@ -15627,7 +15627,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e9a96c0bf89464f4919_param_workspace",
                 "query": {
-                  "datasetName": "7ca4ee39",
+                  "datasetName": "1c3566ad",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -15640,7 +15640,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1ec4ae9c5a6ba412fe62_param_workspace",
                 "query": {
-                  "datasetName": "387f6d69",
+                  "datasetName": "5e6a4710",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -15653,7 +15653,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1ed18c168a70005a6195_param_workspace",
                 "query": {
-                  "datasetName": "19d27545",
+                  "datasetName": "fbd803d5",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -15666,7 +15666,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f0673bd5411e1dae9713a9b15c3fff_param_workspace",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -15679,7 +15679,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f0679599401767abb6b48700938f67_param_workspace",
                 "query": {
-                  "datasetName": "33954b12",
+                  "datasetName": "2cde6c68",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -15754,7 +15754,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "avg_cpu_util_prev_30_60",
@@ -15843,7 +15843,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "avg_mem_util_prev_30_60",
@@ -15915,7 +15915,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "num_clusters_prev_30_60",
@@ -15963,7 +15963,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "pct_clusters_low_cpu_prev_30_60",
@@ -16025,7 +16025,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "total_machine_hours_prev_30_60",
@@ -16073,7 +16073,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "cb7a5570",
+                  "datasetName": "01e1f717",
                   "fields": [
                     {
                       "name": "potential_savings_machine_hours_prev_30_60",
@@ -16155,7 +16155,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f06742adb518bf83f8a06cb405fbd2_cluster_utilization",
                 "query": {
-                  "datasetName": "9bb82443",
+                  "datasetName": "06fc01e6",
                   "fields": [
                     {
                       "name": "cluster_utilization",
@@ -16172,7 +16172,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e9a96c0bf89464f4919_param_cluster_utilization",
                 "query": {
-                  "datasetName": "7ca4ee39",
+                  "datasetName": "1c3566ad",
                   "parameters": [
                     {
                       "name": "param_cluster_utilization",
@@ -16249,7 +16249,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "33954b12",
+                  "datasetName": "2cde6c68",
                   "fields": [
                     {
                       "name": "driver",
@@ -16319,7 +16319,7 @@
       "pageType": "PAGE_TYPE_CANVAS"
     },
     {
-      "name": "b3c9cd35",
+      "name": "266015f2",
       "displayName": "Tabelas de Sistema LakeFlow v0.1: Observabilidade Operacional",
       "layout": [
         {
@@ -16329,7 +16329,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "fields": [
                     {
                       "name": "workspace",
@@ -17167,7 +17167,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "fields": [
                     {
                       "name": "workspace",
@@ -17629,7 +17629,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbd9b9c1bd4b07b83761128abea_param_start_date",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -17642,7 +17642,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbfdc861273b4e02651c8f01a9f_param_start_date",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -17655,7 +17655,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadc467c81e708b6f31e3b62d65d6_param_start_date",
                 "query": {
-                  "datasetName": "5b65e781",
+                  "datasetName": "149c3567",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -17668,7 +17668,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadc4f07e104091a94c5f0a102d9a_param_start_date",
                 "query": {
-                  "datasetName": "6a28dc41",
+                  "datasetName": "af46bae1",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -17722,7 +17722,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbd9b9c1bd4b07b83761128abea_param_end_date",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -17735,7 +17735,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbfdc861273b4e02651c8f01a9f_param_end_date",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -17748,7 +17748,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadc467c81e708b6f31e3b62d65d6_param_end_date",
                 "query": {
-                  "datasetName": "5b65e781",
+                  "datasetName": "149c3567",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -17761,7 +17761,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadc4f07e104091a94c5f0a102d9a_param_end_date",
                 "query": {
-                  "datasetName": "6a28dc41",
+                  "datasetName": "af46bae1",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -17815,7 +17815,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f0673fb52a1570882e205c386e46ec_workspace_name",
                 "query": {
-                  "datasetName": "049a14ff",
+                  "datasetName": "925c9bf4",
                   "fields": [
                     {
                       "name": "workspace_name",
@@ -17832,7 +17832,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e1d92583d01796b0a4e_param_workspace",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -17845,7 +17845,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e30ba6ea775d682efed_param_workspace",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -17858,7 +17858,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01f01345463d1e42b8a46852250a3183_param_workspace",
                 "query": {
-                  "datasetName": "5b65e781",
+                  "datasetName": "149c3567",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -17925,7 +17925,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbd9b9c1bd4b07b83761128abea_param_min_usage",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "parameters": [
                     {
                       "name": "param_min_usage",
@@ -17938,7 +17938,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbfdc861273b4e02651c8f01a9f_param_min_usage",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "parameters": [
                     {
                       "name": "param_min_usage",
@@ -17998,7 +17998,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efac9216a213e9a329193622e33eb1_include_all_clusters",
                 "query": {
-                  "datasetName": "c980521d",
+                  "datasetName": "5d3d07f8",
                   "fields": [
                     {
                       "name": "include_all_clusters",
@@ -18015,7 +18015,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbd9b9c1bd4b07b83761128abea_param_include_all",
                 "query": {
-                  "datasetName": "3b209ef5",
+                  "datasetName": "1925d3af",
                   "parameters": [
                     {
                       "name": "param_include_all",
@@ -18028,7 +18028,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadbfdc861273b4e02651c8f01a9f_param_include_all",
                 "query": {
-                  "datasetName": "a1798302",
+                  "datasetName": "57770a59",
                   "parameters": [
                     {
                       "name": "param_include_all",
@@ -18094,7 +18094,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "6a28dc41",
+                  "datasetName": "af46bae1",
                   "fields": [
                     {
                       "name": "result_state",
@@ -18176,7 +18176,7 @@
       "pageType": "PAGE_TYPE_CANVAS"
     },
     {
-      "name": "8e780d27",
+      "name": "1008d2e6",
       "displayName": "Tabelas de Sistema LakeFlow v0.1: Recomenda\u00e7\u00f5es de Sa\u00fade",
       "layout": [
         {
@@ -18186,7 +18186,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "d19d0cf8",
+                  "datasetName": "8fa0b74c",
                   "fields": [
                     {
                       "name": "workspace",
@@ -18964,7 +18964,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "b1959191",
+                  "datasetName": "bfe346b7",
                   "fields": [
                     {
                       "name": "workspace",
@@ -19657,7 +19657,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "bd84e797",
+                  "datasetName": "8ba8ccf1",
                   "fields": [
                     {
                       "name": "workspace",
@@ -20382,7 +20382,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "de4a6330",
+                  "datasetName": "6be7fd38",
                   "fields": [
                     {
                       "name": "workspace",
@@ -21219,7 +21219,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb54881120cb47ceb5dd41a7344_workspace",
                 "query": {
-                  "datasetName": "290826a0",
+                  "datasetName": "a777bb8d",
                   "fields": [
                     {
                       "name": "workspace",
@@ -21236,7 +21236,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadca99301930a7de3ab3e14bed79_param_workspace",
                 "query": {
-                  "datasetName": "de4a6330",
+                  "datasetName": "6be7fd38",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -21249,7 +21249,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadcb34cd1120870e542a0fa80f56_param_workspace",
                 "query": {
-                  "datasetName": "bd84e797",
+                  "datasetName": "8ba8ccf1",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -21262,7 +21262,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadcc234a1cffa0cddd7a33fdfdd8_param_workspace",
                 "query": {
-                  "datasetName": "b1959191",
+                  "datasetName": "bfe346b7",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -21275,7 +21275,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efadcc3e92183a89cc86cf672c3fc1_param_workspace",
                 "query": {
-                  "datasetName": "d19d0cf8",
+                  "datasetName": "8fa0b74c",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -21343,7 +21343,7 @@
       "pageType": "PAGE_TYPE_CANVAS"
     },
     {
-      "name": "e06cfb32",
+      "name": "a07e3378",
       "displayName": "Tabelas de Sistema LakeFlow v0.1: Pesquisa Interativa",
       "layout": [
         {
@@ -21353,7 +21353,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_start_date",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_start_date",
@@ -21395,7 +21395,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_end_date",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_end_date",
@@ -21437,7 +21437,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacb54881120cb47ceb5dd41a7344_workspace",
                 "query": {
-                  "datasetName": "290826a0",
+                  "datasetName": "a777bb8d",
                   "fields": [
                     {
                       "name": "workspace",
@@ -21454,7 +21454,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_workspace",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_workspace",
@@ -21513,7 +21513,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_top_n",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_top_n",
@@ -21571,7 +21571,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacba488b1dcfaec54f03c6545c62_run_as",
                 "query": {
-                  "datasetName": "21f5a214",
+                  "datasetName": "907184c7",
                   "fields": [
                     {
                       "name": "run_as",
@@ -21588,7 +21588,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_run_as",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_run_as",
@@ -21647,7 +21647,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacbb4a871703b4821e4b2015fdcc_cluster_type",
                 "query": {
-                  "datasetName": "dfff583f",
+                  "datasetName": "60b8c1cc",
                   "fields": [
                     {
                       "name": "cluster_type",
@@ -21664,7 +21664,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_cluster_type",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_cluster_type",
@@ -21724,7 +21724,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacd1cd311c92b5dec39d036f0423_tag_key",
                 "query": {
-                  "datasetName": "7a6f77fd",
+                  "datasetName": "17d00951",
                   "fields": [
                     {
                       "name": "tag_key",
@@ -21741,7 +21741,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_single_tag_key",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_single_tag_key",
@@ -21788,7 +21788,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_tag_entries",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_tag_entries",
@@ -21877,7 +21877,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efaccca90514808393ee5c4c9ba892_object_type",
                 "query": {
-                  "datasetName": "67e2fe82",
+                  "datasetName": "7f7b04d1",
                   "fields": [
                     {
                       "name": "object_type",
@@ -21894,7 +21894,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_object_type",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_object_type",
@@ -21956,7 +21956,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_usage",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_usage",
@@ -22000,7 +22000,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_duration",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_duration",
@@ -22044,7 +22044,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "fields": [
                     {
                       "name": "workspace",
@@ -22929,7 +22929,7 @@
               {
                 "name": "dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacefbe6616d8bb58712c0542ab2d_order_by",
                 "query": {
-                  "datasetName": "01936036",
+                  "datasetName": "758d8186",
                   "fields": [
                     {
                       "name": "order_by",
@@ -22946,7 +22946,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_order_by",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_order_by",
@@ -23006,7 +23006,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_name",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_name",
@@ -23050,7 +23050,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_id",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_id",
@@ -23094,7 +23094,7 @@
               {
                 "name": "parameter_dashboards/01efac9216a11fffa3ae326cef9a1360/datasets/01efacede15e1e629015e395693d9f74_param_run_id",
                 "query": {
-                  "datasetName": "1999ce6e",
+                  "datasetName": "14fd5035",
                   "parameters": [
                     {
                       "name": "param_run_id",

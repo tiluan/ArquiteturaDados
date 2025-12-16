@@ -1,24 +1,24 @@
 {
   "datasets": [
     {
-      "name": "70284b94",
+      "name": "f59b510b",
       "displayName": "Todos os logs do sistema",
       "query": "SELECT * \nFROM system.access.assistant_events"
     },
     {
-      "name": "239168bb",
+      "name": "28d32e84",
       "displayName": "Principais usu\u00e1rios gerais",
       "query": "SELECT initiated_by, COUNT(*) as ct\nFROM system.access.assistant_events\nGROUP BY initiated_by\nSORT BY ct DESC"
     },
     {
-      "name": "90c269e7",
+      "name": "fb6bdc2c",
       "displayName": "Principais usu\u00e1rios por workspace",
       "query": "WITH RankedInitiators AS (\n  SELECT\n    workspace_id,\n    initiated_by,\n    COUNT(*) AS event_count,\n    DENSE_RANK() OVER (PARTITION BY workspace_id ORDER BY COUNT(*) DESC) AS rank\n  FROM system.access.assistant_events\n  GROUP BY workspace_id, initiated_by\n)\nSELECT workspace_id, initiated_by, event_count\nFROM RankedInitiators\nWHERE rank = 1"
     }
   ],
   "pages": [
     {
-      "name": "bc0d597b",
+      "name": "f1054635",
       "displayName": "M\u00e9tricas do Databricks Assistant: Nova P\u00e1gina",
       "layout": [
         {
@@ -28,7 +28,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "596c7066",
+                  "datasetName": "f59b510b",
                   "fields": [
                     {
                       "name": "daily(event_date)",
@@ -82,7 +82,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ce685a08",
+                  "datasetName": "28d32e84",
                   "fields": [
                     {
                       "name": "initiated_by",
@@ -185,7 +185,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "596c7066",
+                  "datasetName": "f59b510b",
                   "fields": [
                     {
                       "name": "monthly(event_date)",
@@ -239,7 +239,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "596c7066",
+                  "datasetName": "f59b510b",
                   "fields": [
                     {
                       "name": "countdistinct(initiated_by)",
@@ -293,7 +293,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "ad4f011f",
+                  "datasetName": "fb6bdc2c",
                   "fields": [
                     {
                       "name": "workspace_id",
@@ -350,7 +350,7 @@
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "596c7066",
+                  "datasetName": "f59b510b",
                   "fields": [
                     {
                       "name": "daily(event_date)",

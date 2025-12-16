@@ -70,8 +70,8 @@ def merge_dashboard_files(files, output_file):
                 new_ds = copy.deepcopy(ds)
                 new_ds['name'] = global_id
 
-                if 'displayName' in new_ds and ' ' in new_ds['displayName']:
-                        new_ds['displayName'] = translate(new_ds['displayName'])
+                if 'displayName' in new_ds:
+                    new_ds['displayName'] = translate(new_ds['displayName'])
 
                 if 'parameters' in new_ds:
                     query_str = new_ds.get('query', '')
@@ -117,12 +117,16 @@ def merge_dashboard_files(files, output_file):
                 new_page['displayName'] = f"{translated_dashboard_title}: {translated_page_name}"
                 new_page['name'] = generate_uuid()
 
-                if 'widgets' in new_page:
-                    for widget in new_page['widgets']:
-                        if 'dataset' in widget and 'name' in widget['dataset']:
-                            local_ds_id = widget['dataset']['name']
-                            if local_ds_id in local_dataset_map:
-                                widget['dataset']['name'] = local_dataset_map[local_ds_id]
+                if 'layout' in new_page:
+                    for item in new_page['layout']:
+                        if 'widget' in item:
+                            widget = item['widget']
+                            if 'queries' in widget:
+                                for query in widget['queries']:
+                                    if 'query' in query and 'datasetName' in query['query']:
+                                        local_ds_id = query['query']['datasetName']
+                                        if local_ds_id in local_dataset_map:
+                                            query['query']['datasetName'] = local_dataset_map[local_ds_id]
 
                         if 'visualization' in widget:
                             vis = widget['visualization']

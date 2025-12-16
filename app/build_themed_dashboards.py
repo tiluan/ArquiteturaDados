@@ -10,17 +10,11 @@ THEMED_DASHBOARDS = {
         "Model Serving Cost Attribution.lvdash.json",
         "azure-serverless-jobs-and-notebooks-cost-observability.lvdash.json"
     ],
-    "2-Performance_de_Infraestrutura": [
-    ],
-    "3-Observabilidade_de_Pipelines_e_Jobs": [
+    "2-Observabilidade_de_Pipelines_e_Jobs": [
         "Jobs System Tables Dashboard.lvdash.json",
         "LakeFlow System Tables Dashboard v0.1.lvdash.json"
     ],
-    "4-Qualidade_e_Integridade_de_Dados": [
-    ],
-    "5-Seguranca_e_Auditoria_de_Acessos": [
-    ],
-    "6-Governanca_de_Metadados": [
+    "3-Governanca_de_Metadados": [
         "databricks-assistant-metrics.lvdash.json"
     ]
 }
